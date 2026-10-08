@@ -11,7 +11,7 @@ help: ## Show targets
 	@awk 'BEGIN{FS=":.*## "} /^[a-z0-9-]+:.*## /{printf "  \033[1m%-18s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 # ── Foundation (prompt 02) ───────────────────────────────────────────────────
-.PHONY: help check deps tf-init preflight images infra-plan infra inventory ping baseline baseline-rerun destroy rhel-unregister
+.PHONY: help check deps tf-init preflight images infra-plan infra inventory ping baseline baseline-rerun down up destroy rhel-unregister
 
 check: deps ## Static checks: tools, ShellCheck, terraform fmt/validate/test, ansible syntax + lint, tracked secrets
 	./scripts/check.sh
@@ -46,6 +46,13 @@ baseline: ## Run the RHEL baseline from Make (Terraform inventory) — expect ch
 
 baseline-rerun: ## Force Terraform to re-run the baseline (the only forced run)
 	$(TF) infra apply -parallelism=$(INFRA_PARALLELISM) -replace=ansible_playbook.baseline
+
+down: ## Stop (never delete) the gt-* VMs: services, cluster, agent, seal Vault last
+	@./scripts/down.sh down
+
+up: ## Start the gt-* VMs (seal Vault first), then unseal: the cluster follows through the agent
+	@./scripts/down.sh up
+	$(RUN) unseal
 
 destroy: ## Destroy ONLY the gt-* VMs (confirmation), archive the Vault roots' state
 	./scripts/destroy.sh

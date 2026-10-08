@@ -73,6 +73,7 @@ nothing: every plan is empty and every Ansible phase reports `changed=0`.
 | Status | `make status` |
 | Drift (read-only) | `make drift` |
 | Tool boundary | `make boundary` |
+| Stop / start the lab | `make down` (never deletes) / `make up` (starts, then unseals) |
 | After a cold start | `make unseal` (one key, for the seal Vault; the rest follows) |
 | Teardown | `make destroy` (only the `gt-*` VMs) |
 | Everything else | `make help` |

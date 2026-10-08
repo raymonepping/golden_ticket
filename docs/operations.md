@@ -17,9 +17,17 @@ No cluster node holds a seal credential: no `seal.env`, no `VAULT_TOKEN`, no
 token file. The `token` value in the seal stanza is a placeholder; the agent
 replaces it on every request.
 
+## Stop and start: `make down` / `make up`
+
+`make down` stops (never deletes) the gt-* VMs: console, front door,
+identity, the cluster (gt-vault-3 first), the seal agent, and the seal Vault
+last. `make up` starts them the other way round and runs `make unseal`.
+Names and roles come from `terraform/infra/nodes.auto.tfvars.json`. Proven
+2026-10-08: `make down` → `make up` → `make validate` green.
+
 ## Cold start (all VMs stopped)
 
-1. `multipass start gt-…` (or start them in any order).
+1. `make up`, or `multipass start gt-…` in any order, then step 3.
 2. The cluster units sit in `activating`: their `ExecStartPre` guard
    (`/usr/local/bin/vault-wait-seal`) fails fast while the agent cannot reach
    an unsealed seal Vault, and systemd retries every 10 s. No crash loop.
