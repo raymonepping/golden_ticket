@@ -104,6 +104,15 @@ it on every run.
 - [docs/lessons-learned.md](docs/lessons-learned.md) — the traps, with fixes
 - [DESIGN.md](DESIGN.md) — the console's design (Vault daylight glass)
 
+## Articles
+
+The series on Medium, one lab per build:
+
+1. multi_pass: Terraform and Ansible passing a baton (*Contracts win*)
+2. red_pass: Ansible only, eight VMs (*Evidence wins*)
+3. Both labs compared: which job belongs to which tool
+4. golden_ticket: *Once, Twice, Three Times a Lab*, the closing build
+
 ## License
 
 [GPLv3](LICENSE)

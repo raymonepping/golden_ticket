@@ -35,6 +35,8 @@ Built 2026-10-08 on branch `better-together`, one commit per prompt.
 - **08 — Console:** red_pass's console on `gt-ux-1`, Provisioned from
   Terraform's `lab_nodes`, baseline evidence, the Layers page, Terraform's
   skipped engines.
+- **10 — Article 04:** *Once, Twice, Three Times a Lab*, the closing article
+  of the series (kept outside Git with the prompts); README links the series.
 - **09 — Proofs and docs:** resilience and drift proofs, enterprise mapping,
   substrate contract, security model, testing, lessons learned.
 
