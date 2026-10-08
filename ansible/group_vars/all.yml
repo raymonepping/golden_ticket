@@ -185,3 +185,10 @@ vault_oidc_redirect_uris: >-
      + (groups['vault'] | default([]) | map('extract', hostvars, 'ansible_host')
         | map('regex_replace', '^(.*)$', 'https://\1:8200/ui/vault/auth/oidc/oidc/callback') | list)
      + ['http://localhost:8250/oidc/callback'] }}
+
+# ── Console on gt-ux-1 (prompt 08) ───────────────────────────────────────────
+ux_user: gtux
+ux_home: /opt/gt-ux
+ux_conf_dir: /etc/gt-ux
+ux_evidence_dir: /var/lib/gt-ux/evidence
+ux_bundle_dir: "{{ build_dir }}/ux"

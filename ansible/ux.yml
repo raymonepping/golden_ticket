@@ -1,0 +1,65 @@
+---
+# ux.yml — deploy the console to gt-ux-1 (observe-only VM mode).
+#
+#   make ux-deploy     (builds the bundle first)
+#   make ux-sync       (evidence only: TAGS=sync)
+
+- name: Inventory
+  ansible.builtin.import_playbook: preamble.yml
+
+- name: Identity secrets for the console's OIDC client, and its engines token
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [deploy]
+  tasks:
+    - name: Read the identity secrets from Vault KV (Ansible's token)
+      ansible.builtin.include_role:
+        name: identity_secrets
+
+    - name: Issue or keep the engines token (through Terraform's token role)
+      ansible.builtin.include_role:
+        name: ux_engines_token
+
+- name: Console
+  hosts: ux
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Deploy the console
+      ansible.builtin.include_role:
+        name: ux_app
+      tags: [deploy]
+
+    - name: Install the engines token and point the console at Vault
+      ansible.builtin.include_role:
+        name: ux_engines_token
+        tasks_from: install.yml
+      tags: [deploy]
+
+    # Dynamic includes do not pass tags to their tasks; `apply` does.
+    - name: Sync evidence only
+      ansible.builtin.include_role:
+        name: ux_app
+        tasks_from: sync.yml
+        apply:
+          tags: [sync]
+      tags: [never, sync]
+
+- name: Mark the console as deployed
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [deploy]
+  tasks:
+    - name: Ensure the deployment-marker directory exists
+      ansible.builtin.file:
+        path: "{{ deployed_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Mark the console as deployed (non-secret; turns on its validation rows)
+      ansible.builtin.copy:
+        content: "{{ {'service': 'ux', 'node': ux_node, 'url': front_door_url} | to_nice_json }}\n"
+        dest: "{{ deployed_dir }}/ux.json"
+        mode: "0644"

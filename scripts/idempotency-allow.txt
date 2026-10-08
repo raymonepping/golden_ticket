@@ -1,2 +1,3 @@
 # Ansible phases allowed to report changes on a converged lab, one per line:
 # <phase> <reason>. Everything else must be changed=0.
+ux        evidence sync: validate rewrites .build/validation.json (new generated_at) every run, so the copy pushed to gt-ux-1 changes; nothing else in ux may change

@@ -70,11 +70,13 @@ for label in "${!values[@]}"; do
     hits=$((hits + 1))
   fi
 done
-# Secret-shaped patterns: Vault service/batch/recovery tokens, PEM private
-# keys, the licence header.
-patterns=('hv[sbr]\.[A-Za-z0-9_-]{20,}' '-----BEGIN [A-Z ]*PRIVATE KEY-----' '02MV4UU43BK5')
+# Secret-shaped patterns: Vault service/batch/recovery tokens, the licence
+# header, and PEM private keys — the header AND a base64 body on the next
+# line (whole-file match, -z): a library that merely checks for the header
+# string (jose's PEM parser) is not a key.
+patterns=('hv[sbr]\.[A-Za-z0-9_-]{20,}' '02MV4UU43BK5' '-----BEGIN [A-Z ]*PRIVATE KEY-----[[:space:]]+[A-Za-z0-9+/=]{40}')
 for pattern in "${patterns[@]}"; do
-  if files="$(grep -rlE -- "${pattern}" "${targets[@]}" 2>/dev/null)"; then
+  if files="$(grep -rlzE -- "${pattern}" "${targets[@]}" 2>/dev/null)"; then
     printf 'LEAK: pattern %s found in %s\n' "${pattern%%[\\\[]*}…" "${files//$'\n'/, }" >&2
     hits=$((hits + 1))
   fi

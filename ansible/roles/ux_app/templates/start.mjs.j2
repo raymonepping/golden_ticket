@@ -1,0 +1,8 @@
+// {{ ansible_managed }}
+// Loads the TLS material Nitro expects as PEM strings, then starts the
+// current release. Paths only in the unit file; contents never in env files.
+import { readFileSync } from 'node:fs'
+
+process.env.NITRO_SSL_CERT = readFileSync('{{ ux_conf_dir }}/tls/server.crt', 'utf8')
+process.env.NITRO_SSL_KEY = readFileSync('{{ ux_conf_dir }}/tls/server.key', 'utf8')
+await import('{{ ux_home }}/current/server/index.mjs')

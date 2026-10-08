@@ -1,0 +1,110 @@
+---
+# Controller side: a valid console token in .secrets/ux/engines-token, issued
+# through Terraform's token role with Ansible's own token. The token is bound
+# to the console VM and the front door, so the controller never uses it
+# directly: it inspects it with auth/token/lookup. no_log throughout.
+
+- name: Find the active Vault node
+  ansible.builtin.include_role:
+    name: lab_common
+    tasks_from: active-addr
+
+- name: Address the active node
+  ansible.builtin.set_fact:
+    ux_engines_token_addr: "{{ hostvars['localhost'].lab_common_active_addr }}"
+
+- name: Issue or keep the console token
+  module_defaults:
+    ansible.builtin.uri:
+      ca_path: "{{ vault_ca_cert }}"
+      headers:
+        X-Vault-Token: "{{ lookup('file', tokens_dir ~ '/ansible-platform') | trim }}"
+  no_log: true
+  block:
+    - name: Require Terraform's token role
+      ansible.builtin.uri:
+        url: "{{ ux_engines_token_addr }}/v1/auth/token/roles/{{ ux_engines_token_role }}"
+        status_code: [200, 404]
+      check_mode: false
+      register: ux_engines_token_role_read
+
+    - name: The token role is Terraform's — run make platform if it is missing
+      ansible.builtin.assert:
+        that: ux_engines_token_role_read.status == 200
+        fail_msg: "Token role {{ ux_engines_token_role }} is missing: it is Terraform's — run 'make platform'."
+        quiet: true
+
+    - name: Check for an existing console token
+      ansible.builtin.stat:
+        path: "{{ ux_engines_token_path }}"
+      register: ux_engines_token_file
+
+    - name: Inspect the existing console token
+      ansible.builtin.uri:
+        url: "{{ ux_engines_token_addr }}/v1/auth/token/lookup"
+        method: POST
+        body_format: json
+        body: { token: "{{ lookup('file', ux_engines_token_path) | trim }}" }
+        status_code: [200, 403]
+      check_mode: false
+      register: ux_engines_token_check
+      when: ux_engines_token_file.stat.exists
+
+    - name: Issue the console token through Terraform's role
+      ansible.builtin.uri:
+        url: "{{ ux_engines_token_addr }}/v1/auth/token/create/{{ ux_engines_token_role }}"
+        method: POST
+        body_format: json
+        body:
+          policies: ["{{ ux_engines_token_policy }}"]
+          display_name: gt-ui-engines
+        status_code: [200]
+      check_mode: false
+      register: ux_engines_token_new_token
+      changed_when: true
+      when:
+        - not ansible_check_mode
+        - not ux_engines_token_file.stat.exists or ux_engines_token_check.status == 403
+
+    - name: Ensure the private console directory exists
+      ansible.builtin.file:
+        path: "{{ ux_engines_token_path | dirname }}"
+        state: directory
+        mode: "0700"
+
+    - name: Persist the console token
+      ansible.builtin.copy:
+        content: "{{ ux_engines_token_new_token.json.auth.client_token }}\n"
+        dest: "{{ ux_engines_token_path }}"
+        mode: "0600"
+      diff: false
+      when: ux_engines_token_new_token is changed # noqa: no-handler -- the token must be on disk before the next tasks read it
+
+    - name: Inspect the console token as it is now
+      ansible.builtin.uri:
+        url: "{{ ux_engines_token_addr }}/v1/auth/token/lookup"
+        method: POST
+        body_format: json
+        body: { token: "{{ lookup('file', ux_engines_token_path) | trim }}" }
+      check_mode: false
+      register: ux_engines_token_proof
+      when: not ansible_check_mode
+
+- name: The console token is narrow, orphan and periodic
+  ansible.builtin.assert:
+    that:
+      - ux_engines_token_proof.json.data.policies | sort == [ux_engines_token_policy]
+      - ux_engines_token_proof.json.data.orphan | bool
+      # Role-periodic tokens report the role and its period as creation_ttl.
+      - ux_engines_token_proof.json.data.role == ux_engines_token_role
+      - ux_engines_token_proof.json.data.creation_ttl | int == ux_engines_token_period_seconds
+      - ux_engines_token_proof.json.data.explicit_max_ttl | int == 0
+      - ux_engines_token_proof.json.data.renewable | bool
+    fail_msg: The console's engines token is not {{ ux_engines_token_policy }}-only, orphan and periodic.
+    quiet: true
+  when: not ansible_check_mode
+
+- name: Remember whether the token needs renewing (TTL only)
+  ansible.builtin.set_fact:
+    ux_engines_token_renew: "{{ (ux_engines_token_proof.json.data.ttl | default(ux_engines_token_period_seconds) | int) < ux_engines_token_min_ttl_seconds }}"
+  when: not ansible_check_mode

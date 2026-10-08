@@ -140,3 +140,48 @@ identity-verify: ## Every person logs in (Keycloak, Vault JWT + LDAP) and gets e
 
 identity-show-user: ## Print one lab login password (PERSON=raymon) — lab only, explicit action
 	@./scripts/identity-show-user.sh "$(PERSON)"
+
+# ── Console (prompt 08) ──────────────────────────────────────────────────────
+.PHONY: ux ux-build ux-deploy ux-sync ui-install ui ui-build ui-start ui-start-auth ui-check ui-a11y trust untrust trust-status
+UI_PORT ?= 3310
+
+ux: ux-build ## Ansible: build + deploy the console to gt-ux-1 (observe-only VM mode)
+	$(RUN) ux
+
+ux-build: ## Build the console bundle (.build/ux, content-addressed)
+	./scripts/ux-build.sh
+
+ux-deploy: ux ## Alias of make ux
+
+ux-sync: ## Push the current evidence to gt-ux-1
+	TAGS=sync $(RUN) ux
+
+ui-install: ## Install the console's dependencies
+	cd ux && npm ci
+
+ui: ## Console in dev mode on 127.0.0.1:$(UI_PORT) (host mode, full Multipass control)
+	cd ux && PORT=$(UI_PORT) npm run dev
+
+ui-build: ## Production build of the console
+	cd ux && npm run build
+
+ui-start: ui-build ## Serve the built console on 127.0.0.1:$(UI_PORT)
+	cd ux && PORT=$(UI_PORT) npm start
+
+ui-start-auth: ui-build ## Host console with Keycloak sign-in and role gating
+	./scripts/ui-start-auth.sh
+
+ui-check: ## Console typecheck, lint, unit tests and build
+	cd ux && npm run typecheck && npm run lint && npm test && npm run build
+
+ui-a11y: ## axe WCAG 2.1 AA scan of every screen (console must be running; GT_UI_URL)
+	cd ux && GT_UI_URL=$${GT_UI_URL:-http://127.0.0.1:$(UI_PORT)} npm run test:a11y
+
+trust: ## Trust the lab CA in the macOS System keychain (sudo)
+	@./scripts/trust.sh trust
+
+untrust: ## Remove the lab CA from the macOS System keychain (sudo)
+	@./scripts/trust.sh untrust
+
+trust-status: ## Is the lab CA trusted, and does macOS accept the front door's certificate?
+	@./scripts/trust.sh status

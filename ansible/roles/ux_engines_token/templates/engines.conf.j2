@@ -1,0 +1,7 @@
+# {{ ansible_managed }} — ux_engines_token
+# Engines page: Vault reads port, namespace, and the path of the read-only
+# token (its contents never appear in the unit or the environment).
+[Service]
+Environment=GT_VAULT_ADDR={{ ux_engines_token_vault_addr }}
+Environment=GT_ENGINES_NAMESPACE={{ ux_engines_token_namespace }}
+Environment=GT_ENGINES_TOKEN_FILE={{ ux_conf_dir }}/engines-token

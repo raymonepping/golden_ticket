@@ -176,3 +176,16 @@ plan clean (after one apply to refresh the outputs the failed apply had
 saved). On the seal Vault, `gt-tf-seal` likewise has no delete on
 `sys/mounts/transit` and none on the key. `prevent_destroy` stays as the
 first, friendlier line of defence.
+
+## D12 — `no_log` does not censor every failure line (2026-10-08)
+
+**Observed.** A `no_log: true` `uri` task that failed before sending (a
+malformed URL, from a variable-name collision) printed the module's error —
+including the offending value — on ansible-core 2.21's `[ERROR]` summary
+line, while the task result itself was censored. The value was non-secret
+token-role metadata.
+
+**Decision.** Never build a URL, header name or other request target from a
+variable that could hold a secret; secrets go only in `headers`/`body` values.
+Role-prefixed variable names (ansible-lint `var-naming[no-role-prefix]`)
+prevent the collision that caused this; the secret scan covers the logs.

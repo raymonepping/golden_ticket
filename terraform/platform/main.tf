@@ -14,6 +14,7 @@ data "terraform_remote_state" "infra" {
 locals {
   repo_root = abspath("${path.module}/../..")
   ux_ip     = data.terraform_remote_state.infra.outputs.ux_address
+  proxy_ip  = data.terraform_remote_state.infra.outputs.proxy_address
 
   # Licence metadata only (features, expiry, licence id) — never the licence
   # itself (docs/decisions.md D9). The provider marks data_json sensitive; the
@@ -97,15 +98,17 @@ resource "vault_policy" "person" {
 }
 
 # The console's Engines token: Terraform builds the role (exactly one policy,
-# orphan, periodic, bound to the console VM); Ansible issues the token.
+# orphan, periodic, no default policy); Ansible issues the token and renews it
+# below 72 h. Bound to the console VM and the front door: the console reads
+# Vault through the proxy, so Vault sees the proxy's address.
 resource "vault_token_auth_backend_role" "ui_engines" {
   role_name               = "gt-ui-engines"
   allowed_policies        = [vault_policy.person["gt-ui-engines"].name]
   orphan                  = true
   renewable               = true
-  token_period            = 86400
+  token_period            = 2592000
   token_no_default_policy = true
-  token_bound_cidrs       = ["${local.ux_ip}/32"]
+  token_bound_cidrs       = ["${local.ux_ip}/32", "${local.proxy_ip}/32"]
 }
 
 # A Terraform-native continuous assertion: warns (never blocks) when the

@@ -1,0 +1,216 @@
+---
+# Deploy the control-plane UI to gt-ux-1 in observe-only VM mode.
+
+- name: Require a built UI bundle on the controller
+  ansible.builtin.find:
+    paths: "{{ ux_bundle_dir }}"
+    patterns: "gt-ux-*.tar.gz"
+  register: ux_app_bundles
+  delegate_to: localhost
+  become: false
+  run_once: true
+  failed_when: ux_app_bundles.matched == 0
+
+- name: Select the newest bundle and its checksum
+  ansible.builtin.set_fact:
+    ux_app_bundle: "{{ (ux_app_bundles.files | sort(attribute='mtime') | last).path }}"
+    ux_app_bundle_sha: "{{ lookup('file', (ux_app_bundles.files | sort(attribute='mtime') | last).path ~ '.sha256') }}"
+  run_once: true
+
+- name: Install Node.js 22 from the RHEL AppStream and the SSH client
+  ansible.builtin.dnf:
+    name: ["@nodejs:22/common", openssh-clients]
+    state: present
+
+- name: Create the service account
+  ansible.builtin.user:
+    name: "{{ ux_user }}"
+    system: true
+    shell: /sbin/nologin
+    home: "{{ ux_home }}"
+    create_home: false
+
+- name: Create the application directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ ux_user }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ ux_home }}", owner: root, mode: "0755" }
+    - { path: "{{ ux_home }}/releases", owner: root, mode: "0755" }
+    - { path: "{{ ux_conf_dir }}", owner: root, mode: "0750" }
+    - { path: "{{ ux_conf_dir }}/tls", owner: root, mode: "0750" }
+    - { path: /var/lib/gt-ux, owner: root, mode: "0755" }
+    - { path: "{{ ux_evidence_dir }}", owner: root, mode: "0755" }
+
+# ── TLS from the lab CA ──────────────────────────────────────────────────────
+- name: Issue the UI certificate
+  ansible.builtin.include_role:
+    name: vault_tls
+    tasks_from: issue.yml
+
+- name: Trust the lab CA on the node
+  ansible.builtin.include_role:
+    name: vault_tls
+    tasks_from: anchor.yml
+
+- name: Install the UI certificate
+  ansible.builtin.copy:
+    src: "{{ tls_dir }}/{{ inventory_hostname }}.crt"
+    dest: "{{ ux_conf_dir }}/tls/server.crt"
+    owner: root
+    group: "{{ ux_user }}"
+    mode: "0640"
+  notify: Restart gt-ux
+
+- name: Install the UI private key (contents suppressed)
+  ansible.builtin.copy:
+    src: "{{ tls_dir }}/{{ inventory_hostname }}.key"
+    dest: "{{ ux_conf_dir }}/tls/server.key"
+    owner: root
+    group: "{{ ux_user }}"
+    mode: "0640"
+  no_log: true
+  diff: false
+  notify: Restart gt-ux
+
+# ── Probe access (forced command on every node) ─────────────────────────────
+- name: Install the probe private key (contents suppressed)
+  ansible.builtin.copy:
+    src: "{{ probe_key }}"
+    dest: "{{ ux_conf_dir }}/probe_ed25519"
+    # OpenSSH refuses a private key readable by anyone but its owner.
+    owner: "{{ ux_user }}"
+    group: "{{ ux_user }}"
+    mode: "0600"
+  no_log: true
+  diff: false
+
+- name: Install the lab SSH host keys for strict checking
+  ansible.builtin.copy:
+    src: "{{ ssh_known_hosts }}"
+    dest: "{{ ux_conf_dir }}/known_hosts"
+    owner: root
+    group: "{{ ux_user }}"
+    mode: "0644"
+
+# ── Sign-in (OIDC client of Keycloak) when the lab has people ───────────────
+- name: Decide whether the console signs people in
+  ansible.builtin.set_fact:
+    ux_app_auth: "{{ (deployed_dir ~ '/identity.json') is file }}"
+
+- name: Install the OIDC client secret and session key (contents suppressed)
+  ansible.builtin.copy:
+    content: "{{ hostvars['localhost'].identity_secrets_values[item.key] }}\n"
+    dest: "{{ ux_conf_dir }}/{{ item.file }}"
+    owner: "{{ ux_user }}"
+    group: "{{ ux_user }}"
+    mode: "0600"
+  loop:
+    - { key: ui_client_secret, file: oidc-client-secret }
+    - { key: ui_session_password, file: session-secret }
+  loop_control:
+    label: "{{ item.file }}"
+  no_log: true
+  diff: false
+  when: ux_app_auth | bool
+  notify: Restart gt-ux
+
+# ── Release ──────────────────────────────────────────────────────────────────
+- name: Check whether this release is already unpacked
+  ansible.builtin.stat:
+    path: "{{ ux_home }}/releases/{{ ux_app_bundle_sha[:16] }}/server/index.mjs"
+  register: ux_app_release
+
+- name: Ship and unpack the release
+  when: not ux_app_release.stat.exists
+  block:
+    - name: Copy the bundle
+      ansible.builtin.copy:
+        src: "{{ ux_app_bundle }}"
+        dest: "/tmp/gt-ux-{{ ux_app_bundle_sha[:16] }}.tar.gz"
+        mode: "0600"
+
+    - name: Verify the bundle checksum
+      ansible.builtin.stat:
+        path: "/tmp/gt-ux-{{ ux_app_bundle_sha[:16] }}.tar.gz"
+        checksum_algorithm: sha256
+      register: ux_app_shipped
+      failed_when: ux_app_shipped.stat.checksum != ux_app_bundle_sha
+
+    - name: Create the release directory
+      ansible.builtin.file:
+        path: "{{ ux_home }}/releases/{{ ux_app_bundle_sha[:16] }}"
+        state: directory
+        mode: "0755"
+
+    - name: Unpack the release
+      ansible.builtin.unarchive:
+        src: "/tmp/gt-ux-{{ ux_app_bundle_sha[:16] }}.tar.gz"
+        dest: "{{ ux_home }}/releases/{{ ux_app_bundle_sha[:16] }}"
+        remote_src: true
+        owner: root
+        group: root
+
+    - name: Remove the shipped archive
+      ansible.builtin.file:
+        path: "/tmp/gt-ux-{{ ux_app_bundle_sha[:16] }}.tar.gz"
+        state: absent
+
+- name: Point current at this release
+  ansible.builtin.file:
+    src: "{{ ux_home }}/releases/{{ ux_app_bundle_sha[:16] }}"
+    dest: "{{ ux_home }}/current"
+    state: link
+    force: true
+  notify: Restart gt-ux
+
+- name: Find old releases
+  ansible.builtin.find:
+    paths: "{{ ux_home }}/releases"
+    file_type: directory
+  register: ux_app_releases
+
+- name: Keep the two newest releases
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ (ux_app_releases.files | sort(attribute='mtime', reverse=true))[2:] }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  when: (item.path | basename) != ux_app_bundle_sha[:16]
+
+- name: Install the launcher
+  ansible.builtin.template:
+    src: start.mjs.j2
+    dest: "{{ ux_home }}/start.mjs"
+    mode: "0644"
+  notify: Restart gt-ux
+
+- name: Install the hardened unit
+  ansible.builtin.template:
+    src: gt-ux.service.j2
+    dest: /etc/systemd/system/gt-ux.service
+    mode: "0644"
+  notify: Restart gt-ux
+
+# The console answers only the front door.
+- name: Open the UI port to the front door only
+  ansible.builtin.include_role:
+    name: lab_common
+    tasks_from: firewall-port
+  vars:
+    lab_common_fw_port: "{{ ux_port }}"
+    lab_common_fw_sources: ["{{ hostvars[proxy_node].ansible_host }}"]
+
+- name: Push the current evidence
+  ansible.builtin.include_tasks: sync.yml
+
+- name: Enable and start the UI
+  ansible.builtin.systemd_service:
+    name: gt-ux
+    state: started
+    enabled: true
+    daemon_reload: true

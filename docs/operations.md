@@ -101,3 +101,31 @@ leader, starts the node again and waits for three Raft voters. Recorded
 2026-10-08: old active `gt-vault-3` stopped → the front door served
 `gt-vault-1` after about 2 s → `gt-vault-3` came back unsealed (through the
 seal agent) as a standby.
+
+## The console (gt-ux-1)
+
+`https://<proxy>/` — sign in with Keycloak (raymon admin, barend operator,
+viewer viewer; `make identity-show-user PERSON=<uid>`). Observe-only in the
+VM: lifecycle actions return 405 and are not rendered; use the host console
+(`make ui-start-auth`, 127.0.0.1:3310) for start/stop/restart.
+
+| Page | Evidence |
+| --- | --- |
+| Fleet | live probes + seal chain (seal Vault → agent → cluster) |
+| Layers | `.build/layers.json`: each phase of `scripts/phases.txt` tagged Terraform or Ansible, plan results, recap counts, the four gates, the automation digest |
+| Engines | live `sys/mounts` in namespace `engines` (narrow token issued through Terraform's `gt-ui-engines` role) + Terraform's skipped engines and reasons |
+| Virtual machines | four indicators per VM: Provisioned (Terraform `lab_nodes`), RHEL healthy (incl. the baseline Terraform applied), Ansible converged (digest), Vault secured / Service |
+| Front door | live HAProxy backends |
+
+`make lab` pushes the final evidence after the stamp (`make ux-sync` does it
+by hand). Recorded 2026-10-08: change a comment in any `.tf` file → after a
+sync every VM shows Ansible **Outdated** and the Layers hero names the applied
+vs current digest; revert + `make lab` → all 32 indicators green. Browser
+checks: `scripts/ui-signin-test.sh https://<proxy>` (sign-in, role gating,
+axe WCAG 2.1 AA on every page at 1440×900 and 390×844: 0 violations) and
+`scripts/ui-signin-test.sh https://<proxy>:8200 e2e/vault-oidc.spec.ts`
+(Vault UI OIDC login through the front door).
+
+The probe key works only as a forced command from gt-ux-1: from the Mac it is
+refused; from gt-ux-1 any command returns the probe output; a port forward is
+refused ("administratively prohibited").

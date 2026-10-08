@@ -33,6 +33,10 @@ output "agent_address" {
   value = one([for name, n in var.nodes : multipass_instance.node[name].ipv4[0] if n.role == "agent"])
 }
 
+output "proxy_address" {
+  value = one([for name, n in var.nodes : multipass_instance.node[name].ipv4[0] if n.role == "proxy"])
+}
+
 output "ux_address" {
   value = one([for name, n in var.nodes : multipass_instance.node[name].ipv4[0] if n.role == "ux"])
 }

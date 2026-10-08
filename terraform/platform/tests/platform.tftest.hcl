@@ -14,6 +14,7 @@ override_data {
   values = {
     outputs = {
       ux_address          = "192.0.2.20"
+      proxy_address       = "192.0.2.30"
       vault_api_addresses = { "gt-vault-1" = "https://192.0.2.11:8200" }
     }
   }
@@ -50,8 +51,8 @@ run "engines_follow_the_licence" {
   }
 
   assert {
-    condition     = vault_token_auth_backend_role.ui_engines.token_bound_cidrs == toset(["192.0.2.20/32"]) && vault_token_auth_backend_role.ui_engines.token_no_default_policy
-    error_message = "The console token role must be bound to the console VM and carry no default policy."
+    condition     = vault_token_auth_backend_role.ui_engines.token_bound_cidrs == toset(["192.0.2.20/32", "192.0.2.30/32"]) && vault_token_auth_backend_role.ui_engines.token_no_default_policy
+    error_message = "The console token role must be bound to the console VM and the front door, and carry no default policy."
   }
 
   assert {

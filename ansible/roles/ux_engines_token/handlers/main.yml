@@ -1,0 +1,6 @@
+---
+- name: Restart gt-ux for the engines token
+  ansible.builtin.systemd_service:
+    name: gt-ux
+    state: restarted
+    daemon_reload: true

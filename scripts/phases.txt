@@ -10,4 +10,5 @@ ansible bootstrap
 tf platform
 ansible proxy
 ansible identity
+ansible ux
 ansible validate

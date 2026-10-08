@@ -1,0 +1,46 @@
+---
+# gt-ux-1 side: the token as a gtux-readable file and a systemd drop-in that
+# points the console at it. ux_app's own files are left untouched.
+
+- name: Install the engines token (contents suppressed)
+  ansible.builtin.copy:
+    src: "{{ ux_engines_token_path }}"
+    dest: "{{ ux_conf_dir }}/engines-token"
+    owner: root
+    group: "{{ ux_user }}"
+    mode: "0640"
+  no_log: true
+  diff: false
+  notify: Restart gt-ux for the engines token
+  # --check before the first real run: there is no token to copy yet.
+  when: not ansible_check_mode or ux_engines_token_path is file
+
+- name: Create the drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/gt-ux.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Point the console at Vault and the token
+  ansible.builtin.template:
+    src: engines.conf.j2
+    dest: /etc/systemd/system/gt-ux.service.d/engines.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart gt-ux for the engines token
+
+# The token is bound to this VM and the front door, so it is renewed from here
+# (through the front door), not from the controller. Maintenance, not a change.
+- name: Renew the console token below the threshold
+  ansible.builtin.uri:
+    url: "{{ ux_engines_token_vault_addr }}/v1/auth/token/renew-self"
+    method: POST
+    headers: { X-Vault-Token: "{{ lookup('file', ux_engines_token_path) | trim }}" }
+  changed_when: false
+  no_log: true
+  when:
+    - not ansible_check_mode
+    - hostvars['localhost'].ux_engines_token_renew | default(false) | bool

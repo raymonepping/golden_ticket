@@ -1,0 +1,42 @@
+# {{ ansible_managed }}
+[Unit]
+Description=golden_ticket control plane UI (observe-only VM mode)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ ux_user }}
+Group={{ ux_user }}
+Environment=NODE_ENV=production
+Environment=HOST=0.0.0.0
+Environment=PORT={{ ux_port }}
+Environment=GT_MODE=vm
+Environment=GT_EVIDENCE_DIR={{ ux_evidence_dir }}
+Environment=GT_PROBE_KEY={{ ux_conf_dir }}/probe_ed25519
+Environment=GT_KNOWN_HOSTS={{ ux_conf_dir }}/known_hosts
+Environment=GT_ALLOWED_ORIGINS={{ ux_public_origins | join(',') }}
+# Outbound TLS (Keycloak discovery/JWKS/token) trusts the lab CA.
+Environment=NODE_EXTRA_CA_CERTS=/etc/pki/ca-trust/source/anchors/golden-ticket-lab-ca.crt
+{% if ux_app_auth | default(false) | bool %}
+Environment=GT_OIDC_ISSUER={{ keycloak_issuer }}
+Environment=GT_OIDC_CLIENT_ID=gt-ui
+Environment=GT_OIDC_CLIENT_SECRET_FILE={{ ux_conf_dir }}/oidc-client-secret
+Environment=GT_SESSION_SECRET_FILE={{ ux_conf_dir }}/session-secret
+Environment=GT_GROUP_ROLES={{ identity_groups | dict2items | map(attribute='key') | zip(identity_groups | dict2items | map(attribute='value.ui_role')) | map('join', '=') | join(',') }}
+{% endif %}
+ExecStart=/usr/bin/node {{ ux_home }}/start.mjs
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+ReadOnlyPaths={{ ux_home }} {{ ux_conf_dir }} {{ ux_evidence_dir }}
+
+[Install]
+WantedBy=multi-user.target

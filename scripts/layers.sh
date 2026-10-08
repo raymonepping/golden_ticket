@@ -23,8 +23,9 @@ while read -r tool name; do
   else
     run="$(json_or_null "${BUILD_DIR}/ansible-stats/${name}.json")"
     chk="$(json_or_null "${BUILD_DIR}/ansible-stats/${name}.check.json")"
-    rows="$(jq --arg n "${name}" --argjson run "${run}" --argjson chk "${chk}" \
-      '. + [{phase: $n, tool: "ansible",
+    allowed="$(awk -v p="${name}" '$1 == p { $1 = ""; sub(/^ +/, ""); print; exit }' "${SCRIPT_DIR}/idempotency-allow.txt")"
+    rows="$(jq --arg n "${name}" --argjson run "${run}" --argjson chk "${chk}" --arg allowed "${allowed}" \
+      '. + [{phase: $n, tool: "ansible", allowed_changes: (if $allowed == "" then null else $allowed end),
              last_run: (if $run then {at: $run.finished_at, changed: $run.changed_total, failed: $run.failed_total} else null end),
              last_check: (if $chk then {at: $chk.finished_at, changed: $chk.changed_total} else null end)}]' <<<"${rows}")"
   fi
@@ -36,6 +37,12 @@ for gate in idempotency drift secret-scan validation; do
 done
 
 umask 022
+# Host-mode console: Terraform's own record of the engines it mounts / skips.
+if terraform -chdir="${TF_DIR}/platform" output -json engines >"${BUILD_DIR}/engines.json.tmp" 2>/dev/null; then
+  mv "${BUILD_DIR}/engines.json.tmp" "${BUILD_DIR}/engines.json"
+else
+  rm -f "${BUILD_DIR}/engines.json.tmp"
+fi
 jq -n --argjson rows "${rows}" --argjson gates "${gates}" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   '{generated_at: $at, phases: $rows, gates: $gates}' >"${BUILD_DIR}/layers.json.tmp"
 mv "${BUILD_DIR}/layers.json.tmp" "${BUILD_DIR}/layers.json"

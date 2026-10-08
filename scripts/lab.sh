@@ -34,7 +34,11 @@ for entry in "${PHASES[@]}"; do
   t0=$(date +%s)
   case "${tool}" in
   tf) make "$([[ "${name}" == infra ]] && echo infra || echo "${name}")" || fail "${tool} ${name}" "make ${name}" ;;
-  ansible) "${SCRIPT_DIR}/ansible-run.sh" "${name}" || fail "${tool} ${name}" "make ${name}" ;;
+  ansible)
+    # The console ships a content-addressed bundle: build it from today's source first.
+    if [[ "${name}" == ux ]]; then "${SCRIPT_DIR}/ux-build.sh" >/dev/null || fail "ux-build" "make ux-build"; fi
+    "${SCRIPT_DIR}/ansible-run.sh" "${name}" || fail "${tool} ${name}" "make ${name}"
+    ;;
   esac
   timings="$(jq --arg p "${name}" --argjson s "$(($(date +%s) - t0))" '.[$p] = $s' <<<"${timings}")"
 done
@@ -63,4 +67,8 @@ jq -n \
   >"${BUILD_DIR}/convergence.json.tmp"
 mv "${BUILD_DIR}/convergence.json.tmp" "${BUILD_DIR}/convergence.json"
 "${SCRIPT_DIR}/layers.sh"
+# The stamp and layers exist only now: hand the VM-mode console the final evidence.
+if grep -Eq '^ansible ux$' "${SCRIPT_DIR}/phases.txt"; then
+  TAGS=sync "${SCRIPT_DIR}/ansible-run.sh" ux >/dev/null
+fi
 banner "done" "golden_ticket converged — digest ${digest:0:12}, evidence in .build/"

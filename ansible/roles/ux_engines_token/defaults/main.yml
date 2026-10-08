@@ -1,0 +1,14 @@
+---
+# The console's read-only Vault token for the Engines page. The policy and the
+# token role (exactly one policy, orphan, 720 h period, no default policy,
+# bound to the console VM and the front door) are Terraform's
+# (terraform/platform); Ansible only issues the token through that role with
+# its own token, and renews it below 72 h.
+ux_engines_token_policy: gt-ui-engines
+ux_engines_token_role: gt-ui-engines
+ux_engines_token_period_seconds: 2592000
+ux_engines_token_min_ttl_seconds: 259200   # renew below 72h
+ux_engines_token_namespace: engines
+ux_engines_token_path: "{{ secrets_dir }}/ux/engines-token"
+# Reads may be served by any unsealed node: the front door's reads port.
+ux_engines_token_vault_addr: "{{ front_door_url }}:{{ proxy_ports.vault_reads }}"

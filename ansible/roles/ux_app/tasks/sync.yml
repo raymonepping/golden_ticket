@@ -1,0 +1,69 @@
+---
+# Push the non-secret evidence the VM-mode console reads. Ownership is
+# Terraform's contract: the lab_nodes and baseline_digest outputs of
+# terraform/infra, wrapped as ownership.json. The automation digest is
+# computed on the controller now, with the same script make lab uses.
+
+- name: Read Terraform's contract and compute the digest (controller)
+  ansible.builtin.command:
+    argv: "{{ item.argv }}"
+  loop:
+    - { id: lab_nodes, argv: [terraform, "-chdir={{ repo_root }}/terraform/infra", output, -json, lab_nodes] }
+    - { id: baseline, argv: [terraform, "-chdir={{ repo_root }}/terraform/infra", output, -raw, baseline_digest] }
+    - { id: engines, argv: [terraform, "-chdir={{ repo_root }}/terraform/platform", output, -json, engines] }
+    - { id: digest, argv: ["{{ repo_root }}/scripts/automation-digest.sh"] }
+  loop_control:
+    label: "{{ item.id }}"
+  register: ux_app_sync_reads
+  changed_when: false
+  check_mode: false
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Push Terraform's contract as ownership.json and the engines plan
+  ansible.builtin.copy:
+    content: "{{ item.content | to_nice_json(sort_keys=true) }}\n"
+    dest: "{{ ux_evidence_dir }}/{{ item.file }}"
+    owner: root
+    group: "{{ ux_user }}"
+    mode: "0644"
+  loop:
+    - file: ownership.json
+      content:
+        project: golden_ticket
+        provisioned_by: terraform/infra
+        baseline_digest: "{{ ux_app_sync_reads.results[1].stdout | trim }}"
+        nodes: "{{ ux_app_sync_reads.results[0].stdout | from_json }}"
+    - file: engines.json
+      content: "{{ ux_app_sync_reads.results[2].stdout | from_json }}"
+  loop_control:
+    label: "{{ item.file }}"
+
+- name: Check which evidence files exist
+  ansible.builtin.stat:
+    path: "{{ build_dir }}/{{ item }}"
+  loop: [convergence.json, validation.json, layers.json]
+  register: ux_app_evidence_files
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Push the evidence files
+  ansible.builtin.copy:
+    src: "{{ item.stat.path }}"
+    dest: "{{ ux_evidence_dir }}/{{ item.item }}"
+    owner: root
+    group: "{{ ux_user }}"
+    mode: "0644"
+  loop: "{{ ux_app_evidence_files.results | selectattr('stat.exists') | list }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Push the automation digest
+  ansible.builtin.copy:
+    content: "{{ ux_app_sync_reads.results[3].stdout | trim }}\n"
+    dest: "{{ ux_evidence_dir }}/automation-digest.txt"
+    owner: root
+    group: "{{ ux_user }}"
+    mode: "0644"
