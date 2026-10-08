@@ -80,6 +80,24 @@ gt-agent-1  Vault Agent, api_proxy force token, mTLS :8100  ansible/agent.yml
 gt-vault-1..3  seal "transit"                               ansible/converge.yml
 ```
 
+## The front door
+
+```text
+                     you (browser / CLI)   TLS (lab CA)
+                               │
+                         gt-proxy-1   HAProxy — TLS in, verified TLS out (verifyhost)
+   ┌────────────┬──────────────┼──────────────┬───────────────┬──────────────┐
+ :8200        :8202          :8210          :443            :8443          :9000
+ active node  any unsealed   seal Vault     console         Keycloak       /node/<name>/…
+ (writes, UI) (reads)        (operator)     gt-ux-1         gt-identity-1  one node
+```
+
+Backends come from the Terraform inventory, never from literals. The
+Keycloak issuer, Vault's OIDC callbacks and the console's origins point at the
+front door from day one (in red_pass they had to be re-pointed later). Stats
+(:8404) need the password Ansible generated into `secret/golden-ticket/proxy`;
+the config holds only its sha512-crypt hash.
+
 See [operations.md](operations.md) for cold start, restarts, rotation and the
 drift demos, and [decisions.md](decisions.md) for the evidence behind each
 non-obvious choice.

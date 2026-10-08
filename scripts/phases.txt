@@ -8,4 +8,5 @@ tf seal
 ansible agent
 ansible bootstrap
 tf platform
+ansible proxy
 ansible validate

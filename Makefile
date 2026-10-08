@@ -119,3 +119,12 @@ digest: ## Print the automation digest
 
 layers: ## Rebuild .build/layers.json from the evidence
 	./scripts/layers.sh
+
+# ── Front door (prompt 06) ───────────────────────────────────────────────────
+.PHONY: proxy proxy-failover-test
+
+proxy: ## Ansible: HAProxy front door on gt-proxy-1
+	$(RUN) proxy
+
+proxy-failover-test: ## Stop Vault on the active node; the front door must follow the new leader (changes state)
+	$(RUN) proxy-failover-test

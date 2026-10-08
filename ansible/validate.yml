@@ -345,6 +345,121 @@
                'role': hostvars[item].gt_role, 'checks': hostvars[item].val_node_checks | default([])}}) }}
       loop: "{{ groups['agent'] + groups['proxy'] + groups['identity'] + groups['ux'] }}"
 
+    - name: Front-door checks
+      block:
+        - name: Which services are deployed (markers from identity.yml / ux.yml)
+          ansible.builtin.stat:
+            path: "{{ deployed_dir }}/{{ item }}.json"
+          loop: [identity, ux]
+          register: val_deployed
+
+        - name: Remember the deployed services
+          ansible.builtin.set_fact:
+            val_is_deployed: "{{ dict(val_deployed.results | map(attribute='item') | zip(val_deployed.results | map(attribute='stat.exists'))) }}"
+
+        - name: Read through the front door with verified TLS
+          ansible.builtin.uri:
+            url: "{{ item.url }}"
+            ca_path: "{{ vault_ca_cert }}"
+            status_code: [200, 401, 429, 503]
+            return_content: true
+          check_mode: false
+          failed_when: false
+          loop:
+            - { id: fd-vault, label: "Vault (active node) via front door", url: "{{ front_door_url }}:{{ proxy_ports.vault }}/v1/sys/health" }
+            - id: fd-reads
+              label: "Vault reads via front door"
+              url: "{{ front_door_url }}:{{ proxy_ports.vault_reads }}/v1/sys/health?standbyok=true&perfstandbyok=true"
+            - id: fd-node
+              label: "Any node by path (/node/gt-vault-2)"
+              url: "{{ front_door_url }}:{{ proxy_ports.nodes }}/node/gt-vault-2/v1/sys/health?standbyok=true&perfstandbyok=true"
+            - { id: fd-seal, label: "Seal Vault via front door", url: "{{ front_door_url }}:{{ proxy_ports.seal }}/v1/sys/health" }
+            - { id: fd-stats-anon, label: "Stats refuse an anonymous client", url: "{{ front_door_url }}:{{ proxy_ports.stats }}/stats" }
+            - { id: fd-ui, label: "Console via front door", url: "{{ front_door_url }}:{{ proxy_ports.ui }}/api/health", needs: ux }
+            - id: fd-kc
+              label: "Keycloak issuer via front door"
+              url: "{{ keycloak_issuer }}/.well-known/openid-configuration"
+              needs: identity
+          loop_control:
+            label: "{{ item.id }}"
+          register: val_fd_reads
+
+        - name: Read the stats password (Ansible's own token)
+          ansible.builtin.uri:
+            url: "{{ val_addr }}/v1/{{ identity_kv_mount }}/data/{{ proxy_kv_path }}"
+            ca_path: "{{ vault_ca_cert }}"
+            headers: { X-Vault-Token: "{{ lookup('file', tokens_dir ~ '/ansible-platform') | trim }}" }
+            status_code: [200, 404]
+          register: val_stats_secret
+          check_mode: false
+          failed_when: false
+          no_log: true
+
+        - name: Stats answer with the password
+          ansible.builtin.uri:
+            url: "{{ front_door_url }}:{{ proxy_ports.stats }}/stats"
+            ca_path: "{{ vault_ca_cert }}"
+            url_username: stats
+            url_password: "{{ val_stats_secret.json.data.data.stats_password | default('') }}"
+            force_basic_auth: true
+            status_code: [200, 401]
+          register: val_stats_auth
+          check_mode: false
+          failed_when: false
+          no_log: true
+
+        - name: Backends refuse direct access from here
+          ansible.builtin.wait_for:
+            host: "{{ item.host }}"
+            port: "{{ item.port }}"
+            timeout: 3
+          check_mode: false
+          failed_when: false
+          loop:
+            - { id: fd-direct-ui, label: "Console refuses direct access", host: "{{ hostvars[ux_node].ansible_host }}", port: "{{ ux_port }}", needs: ux }
+            - id: fd-direct-kc
+              label: "Keycloak refuses direct access"
+              host: "{{ hostvars[identity_node].ansible_host }}"
+              port: "{{ keycloak_port }}"
+              needs: identity
+            - id: fd-direct-agent
+              label: "Seal agent refuses non-cluster clients"
+              host: "{{ hostvars[agent_node].ansible_host }}"
+              port: "{{ agent_port }}"
+          loop_control:
+            label: "{{ item.id }}"
+          register: val_fd_direct
+
+        - name: Front-door rows
+          ansible.builtin.set_fact:
+            val_front_door: >-
+              {%- set out = [] -%}
+              {%- for r in val_fd_reads.results -%}
+              {%- set needs = r.item.needs | default('') -%}
+              {%- if needs and not val_is_deployed[needs] -%}
+              {%- set _ = out.append({'id': r.item.id, 'label': r.item.label, 'status': 'skipped', 'detail': needs ~ ' not deployed yet'}) -%}
+              {%- else -%}
+              {%- set want = 401 if r.item.id == 'fd-stats-anon' else 200 -%}
+              {%- set ok = (r.status | default(0)) == want and (r.item.id != 'fd-kc' or (r.json.issuer | default('')) == keycloak_issuer) -%}
+              {%- set _ = out.append({'id': r.item.id, 'label': r.item.label, 'status': 'pass' if ok else 'fail',
+                    'detail': 'HTTP ' ~ (r.status | default('no answer'))}) -%}
+              {%- endif -%}
+              {%- endfor -%}
+              {%- set _ = out.append({'id': 'fd-stats-auth', 'label': 'Stats answer with the password',
+                    'status': 'pass' if val_stats_auth.status | default(0) == 200 else 'fail',
+                    'detail': 'HTTP ' ~ (val_stats_auth.status | default('no answer'))}) -%}
+              {%- for r in val_fd_direct.results -%}
+              {%- set needs = r.item.needs | default('') -%}
+              {%- if needs and not val_is_deployed[needs] -%}
+              {%- set _ = out.append({'id': r.item.id, 'label': r.item.label, 'status': 'skipped', 'detail': needs ~ ' not deployed yet'}) -%}
+              {%- else -%}
+              {%- set refused = 'Timeout' in (r.msg | default('')) -%}
+              {%- set _ = out.append({'id': r.item.id, 'label': r.item.label, 'status': 'pass' if refused else 'fail',
+                    'detail': 'refused or filtered' if refused else 'reachable without the proxy'}) -%}
+              {%- endif -%}
+              {%- endfor -%}
+              {{ out }}
+
     - name: Build the evidence report
       ansible.builtin.set_fact:
         validation:
@@ -382,7 +497,7 @@
                                 ~ (val_declared.token_roles.value | length) ~ ' token role(s)'}] }}
           boundary: "{{ val_boundary_rows }}"
           identity: []
-          front_door: []
+          front_door: "{{ val_front_door }}"
           seal_chain: >-
             {{ [{'id': 'seal_key', 'label': 'Transit key autounseal present',
                  'status': 'pass' if val_agent.key_ok | bool else 'fail',

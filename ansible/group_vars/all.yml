@@ -116,8 +116,34 @@ firewall_expected_ports:
   cluster: [8200/tcp, 8201/tcp]
   seal: [8200/tcp, 8201/tcp]
   agent: []
-  proxy: []
+  proxy: [443/tcp, 8200/tcp, 8202/tcp, 8210/tcp, 8404/tcp, 8443/tcp, 9000/tcp]
   identity: []
   ux: []
 clock_max_offset_seconds: 1.0
 rotation_max_age_hours: 7
+
+# ── Front door: HAProxy on gt-proxy-1 (prompt 06) ────────────────────────────
+# Everything public points at the front door from day one: the Keycloak
+# issuer, Vault's OIDC callbacks and the console origins (prompts 07/08).
+proxy_dir: /etc/haproxy/golden-ticket
+proxy_names: [vault.golden-ticket.lab, ui.golden-ticket.lab, id.golden-ticket.lab]
+proxy_ports:
+  vault: 8200
+  vault_reads: 8202
+  ui: 443
+  keycloak: 8443
+  seal: 8210
+  nodes: 9000
+  stats: 8404
+front_door_url: "https://{{ hostvars[proxy_node].ansible_host | default(proxy_node) }}"
+identity_kv_mount: secret
+proxy_kv_path: golden-ticket/proxy
+ux_port: 3443
+keycloak_port: 8443
+keycloak_mgmt_port: 9000
+identity_realm: golden-ticket
+keycloak_public_url: "{{ front_door_url }}:{{ proxy_ports.keycloak }}"
+keycloak_issuer: "{{ keycloak_public_url }}/realms/{{ identity_realm }}"
+# Written by identity.yml / ux.yml once their service is deployed; until
+# then the matching front-door rows are "skipped", never "pass".
+deployed_dir: "{{ build_dir }}/deployed"

@@ -1,0 +1,15 @@
+---
+# proxy.yml — the front door on gt-proxy-1 (Terraform built the VM and its
+# baseline; Ansible furnishes it).
+#
+#   make proxy
+
+- name: Inventory
+  ansible.builtin.import_playbook: preamble.yml
+
+- name: HAProxy front door
+  hosts: proxy
+  become: true
+  gather_facts: false
+  roles:
+    - edge_proxy

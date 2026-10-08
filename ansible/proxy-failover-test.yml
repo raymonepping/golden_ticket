@@ -1,0 +1,101 @@
+---
+# proxy-failover-test.yml — stop Vault on the active node; the front door must
+# serve the new leader within 15 s; start the node again (it auto-unseals
+# through the seal agent).
+# Changes live state on purpose: explicit `make proxy-failover-test` only.
+
+- name: Inventory
+  ansible.builtin.import_playbook: preamble.yml
+
+- name: Find the active node through the front door
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Ask every node whether it is active
+      ansible.builtin.uri:
+        url: "https://{{ hostvars[item].ansible_host }}:{{ vault_api_port }}/v1/sys/health"
+        ca_path: "{{ vault_ca_cert }}"
+        status_code: [200, 429, 472, 473, 501, 503]
+      loop: "{{ groups['vault'] | sort }}"
+      register: proxy_fo_health
+
+    - name: Remember the active node
+      ansible.builtin.set_fact:
+        proxy_fo_active: "{{ (proxy_fo_health.results | selectattr('status', 'equalto', 200) | first).item }}"
+
+    - name: Target it in the next plays
+      ansible.builtin.add_host:
+        name: "{{ proxy_fo_active }}"
+        groups: failover_target
+      changed_when: false
+
+- name: Stop Vault on the active node
+  hosts: failover_target
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Stop vault
+      ansible.builtin.systemd_service:
+        name: vault
+        state: stopped
+
+- name: The front door follows the new leader
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Wait for an active node through the front door
+      ansible.builtin.uri:
+        url: "{{ front_door_url }}:{{ proxy_ports.vault }}/v1/sys/health"
+        ca_path: "{{ vault_ca_cert }}"
+        status_code: [200, 503]
+      register: proxy_fo_door
+      until: proxy_fo_door.status == 200
+      retries: 15
+      delay: 1
+
+    - name: Report the new leader
+      ansible.builtin.debug:
+        msg: "Front door serves the new leader after ~{{ proxy_fo_door.attempts | default(1) }} s; old active {{ proxy_fo_active }} stopped."
+
+- name: Bring the old active node back
+  hosts: failover_target
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Start vault
+      ansible.builtin.systemd_service:
+        name: vault
+        state: started
+
+- name: It auto-unseals and rejoins
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Wait for the node to be unsealed (standby)
+      ansible.builtin.uri:
+        url: "https://{{ hostvars[proxy_fo_active].ansible_host }}:{{ vault_api_port }}/v1/sys/seal-status"
+        ca_path: "{{ vault_ca_cert }}"
+      register: proxy_fo_back
+      until: not proxy_fo_back.json.sealed
+      retries: 30
+      delay: 2
+
+    - name: Three Raft voters again (Ansible's own token)
+      ansible.builtin.include_role:
+        name: lab_common
+        tasks_from: active-addr
+
+    - name: Read the Raft configuration
+      ansible.builtin.uri:
+        url: "{{ lab_common_active_addr }}/v1/sys/storage/raft/configuration"
+        ca_path: "{{ vault_ca_cert }}"
+        headers: { X-Vault-Token: "{{ lookup('file', tokens_dir ~ '/ansible-platform') | trim }}" }
+      register: proxy_fo_raft
+      no_log: true
+      until: >-
+        proxy_fo_raft.json.data.config.servers | selectattr('voter', 'equalto', true) | list | length == groups['vault'] | length
+      retries: 20
+      delay: 3

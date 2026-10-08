@@ -1,0 +1,149 @@
+# {{ ansible_managed }}
+# golden_ticket front door. Pattern: vault_reference compose/edge.
+# TLS terminates here and is re-encrypted to every backend, verified against
+# the lab CA with the backend's own name (verifyhost). Backends come from
+# the inventory; nothing here is a hand-written address.
+
+global
+    log /dev/log local0
+    maxconn 4000
+    user haproxy
+    group haproxy
+    daemon
+    ssl-default-bind-options ssl-min-ver TLSv1.2
+    stats socket /var/lib/haproxy/stats mode 600 level operator
+
+defaults
+    log     global
+    mode    http
+    option  httplog
+    option  dontlognull
+    option  forwardfor
+    option  redispatch
+    retries 3
+    timeout connect 5s
+    timeout client  60s
+    timeout server  60s
+    timeout http-request 30s
+    default-server ssl verify required ca-file {{ proxy_dir }}/ca.crt check check-ssl inter 3s rise 2 fall 2
+
+{% set vault_nodes = groups['vault'] | sort %}
+{% macro hsts() %}
+    http-response set-header Strict-Transport-Security "max-age=31536000"
+    http-request set-header X-Forwarded-Proto https
+{% endmacro %}
+# ── Vault, writes and UI: the active node only ────────────────────────────────
+# Bare /v1/sys/health is 200 only on the active node (standbys answer 429),
+# so all traffic follows the leader; on failover the new leader starts
+# passing within ~6 s (rise 2 × inter 3s).
+frontend vault
+    bind {{ ansible_host }}:{{ proxy_ports.vault }} ssl crt {{ proxy_dir }}/front-door.pem alpn h2,http/1.1
+{{ hsts() }}
+    default_backend vault_active
+
+backend vault_active
+    option httpchk GET /v1/sys/health
+    http-check expect status 200
+{% for n in vault_nodes %}
+    server {{ n }} {{ hostvars[n].ansible_host }}:{{ vault_api_port }} sni str({{ n }}) verifyhost {{ n }}
+{% endfor %}
+
+# ── Vault reads: any unsealed node (Enterprise performance standbys answer
+#    473 without perfstandbyok) ──────────────────────────────────────────────
+frontend vault_reads
+    bind {{ ansible_host }}:{{ proxy_ports.vault_reads }} ssl crt {{ proxy_dir }}/front-door.pem alpn h2,http/1.1
+{{ hsts() }}
+    default_backend vault_any
+
+backend vault_any
+    balance leastconn
+    option httpchk GET /v1/sys/health?standbyok=true&perfstandbyok=true
+    http-check expect status 200
+{% for n in vault_nodes %}
+    server {{ n }} {{ hostvars[n].ansible_host }}:{{ vault_api_port }} sni str({{ n }}) verifyhost {{ n }}
+{% endfor %}
+
+# ── Seal Vault (operator only) ───────────────────────────────────────────────
+frontend seal_vault
+    bind {{ ansible_host }}:{{ proxy_ports.seal }} ssl crt {{ proxy_dir }}/front-door.pem alpn h2,http/1.1
+{{ hsts() }}
+    default_backend seal_vault
+
+backend seal_vault
+    option httpchk GET /v1/sys/health
+    http-check expect status 200
+    server {{ lab_seal_node }} {{ hostvars[lab_seal_node].ansible_host }}:{{ vault_api_port }} sni str({{ lab_seal_node }}) verifyhost {{ lab_seal_node }}
+
+# ── Console (gt-ux-1; DOWN until prompt 08 deploys it) ───────────────────────
+frontend ui
+    bind {{ ansible_host }}:{{ proxy_ports.ui }} ssl crt {{ proxy_dir }}/front-door.pem alpn h2,http/1.1
+{{ hsts() }}
+    default_backend ui
+
+backend ui
+    option httpchk GET /api/health
+    http-check expect status 200
+{% for n in groups['ux'] | sort %}
+    server {{ n }} {{ hostvars[n].ansible_host }}:{{ ux_port }} sni str({{ n }}) verifyhost {{ n }}
+{% endfor %}
+
+# ── Keycloak (gt-identity-1; DOWN until prompt 07 deploys it) ────────────────
+frontend keycloak
+    bind {{ ansible_host }}:{{ proxy_ports.keycloak }} ssl crt {{ proxy_dir }}/front-door.pem alpn h2,http/1.1
+{{ hsts() }}
+    http-request set-header X-Forwarded-Host %[req.hdr(host)]
+    http-request set-header X-Forwarded-Port {{ proxy_ports.keycloak }}
+    # People land on their own realm, not on the master-realm admin console
+    # (which only knows `admin`); /admin stays reachable for the operator.
+    http-request redirect location /realms/{{ identity_realm }}/account code 302 if { path / }
+    default_backend keycloak
+
+backend keycloak
+    option httpchk GET /realms/{{ identity_realm }}/.well-known/openid-configuration
+    http-check expect status 200
+{% for n in groups['identity'] | sort %}
+    server {{ n }} {{ hostvars[n].ansible_host }}:{{ keycloak_port }} sni str({{ n }}) verifyhost {{ n }}
+{% endfor %}
+
+# ── Any node by path: /node/<name>/v1/... → that node's Vault API ────────────
+# Health accepts standbys and sealed nodes so a node is reachable for
+# diagnosis even when it is not serving.
+frontend nodes
+    bind {{ ansible_host }}:{{ proxy_ports.nodes }} ssl crt {{ proxy_dir }}/front-door.pem alpn h2,http/1.1
+{{ hsts() }}
+{% for n in (vault_nodes + [lab_seal_node]) %}
+    acl path_{{ n | replace('-', '_') }} path_beg /node/{{ n }}/
+    use_backend node_{{ n | replace('-', '_') }} if path_{{ n | replace('-', '_') }}
+{% endfor %}
+    # http-request rules run before use_backend, so unknown paths go to a
+    # backend that answers 404 instead of a frontend-level deny.
+    default_backend node_unknown
+
+backend node_unknown
+    http-request deny deny_status 404
+
+{% for n in (vault_nodes + [lab_seal_node]) %}
+backend node_{{ n | replace('-', '_') }}
+    http-request replace-path ^/node/{{ n }}(/.*)$ \1
+    option httpchk GET /v1/sys/health?standbyok=true&perfstandbyok=true&sealedcode=200&uninitcode=200
+    http-check expect status 200
+    server {{ n }} {{ hostvars[n].ansible_host }}:{{ vault_api_port }} sni str({{ n }}) verifyhost {{ n }}
+
+{% endfor %}
+# ── Stats: HTTPS + basic auth (password in Vault KV) on the proxy address;
+#    an unauthenticated CSV view on loopback for the read-only node probe ────
+userlist stats_users
+    # sha512-crypt; the clear password lives only in Vault KV.
+    user stats password {{ edge_proxy_stats_hash }}
+
+listen stats
+    bind {{ ansible_host }}:{{ proxy_ports.stats }} ssl crt {{ proxy_dir }}/front-door.pem
+    http-request auth realm golden_ticket unless { http_auth(stats_users) }
+    stats enable
+    stats uri /stats
+    stats refresh 10s
+
+listen stats_local
+    bind 127.0.0.1:8405
+    stats enable
+    stats uri /

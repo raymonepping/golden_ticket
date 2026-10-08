@@ -76,7 +76,7 @@
       {{ vault_tls_node_cert.subject_alt_name is not defined
          or vault_tls_node_cert.expired | default(true)
          or ('IP:' ~ ansible_host) not in vault_tls_node_cert.subject_alt_name
-         or (tls_extra_dns_names | default([]) | map('regex_replace', '^', 'DNS:') | list
+         or (vault_tls_extra_dns_names | default([]) | map('regex_replace', '^', 'DNS:') | list
              | difference(vault_tls_node_cert.subject_alt_name) | length > 0) }}
 
 - name: Issue the node certificate
@@ -96,7 +96,7 @@
         common_name: "{{ inventory_hostname }}"
         subject_alt_name: >-
           {{ ['DNS:' ~ inventory_hostname, 'DNS:localhost', 'IP:' ~ ansible_host, 'IP:127.0.0.1']
-             + (tls_extra_dns_names | default([]) | map('regex_replace', '^', 'DNS:') | list) }}
+             + (vault_tls_extra_dns_names | default([]) | map('regex_replace', '^', 'DNS:') | list) }}
         extended_key_usage: [serverAuth, clientAuth]
       register: vault_tls_node_csr
 

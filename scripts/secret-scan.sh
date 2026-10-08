@@ -34,7 +34,17 @@ if command -v multipass >/dev/null 2>&1; then
     [[ -n "${v}" ]] && values["agent:${f##*/}"]="${v}"
   done
 fi
-# Extra values (identity secrets) may be supplied by later phases
+# Every value Ansible generated into Vault KV (secret/golden-ticket/*: proxy
+# stats password, identity secrets), read with Ansible's own token.
+if [[ -s "${SECRETS_DIR}/tokens/ansible-platform" ]] && addr="$("${SCRIPT_DIR}/vault-addr.sh" platform 2>/dev/null)"; then
+  for path in proxy identity; do
+    while IFS=$'\t' read -r key value; do
+      [[ -n "${key}" ]] && values["kv:${path}/${key}"]="${value}"
+    done < <(curl -fsS --cacert "${SECRETS_DIR}/tls/ca.crt" -H "X-Vault-Token: $(<"${SECRETS_DIR}/tokens/ansible-platform")" \
+      "${addr}/v1/secret/data/golden-ticket/${path}" 2>/dev/null | jq -r '.data.data // {} | to_entries[] | "\(.key)\t\(.value)"' || true)
+  done
+fi
+# Extra values may be supplied by later phases
 # as a 0600 file of label<TAB>value lines; it is read, never printed.
 if [[ -f "${CACHE_DIR}/secret-scan.extra" ]]; then
   while IFS=$'\t' read -r label value; do

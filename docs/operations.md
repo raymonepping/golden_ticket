@@ -76,3 +76,28 @@ the `gt-*` VMs through `terraform/infra`, and archives the seal/platform state
 to `.secrets/archive/<timestamp>/` — those Vaults died with their VMs, and the
 critical resources are never `terraform destroy`ed. It prints the reset steps
 for a completely fresh lab. `make rhel-unregister` is separate and explicit.
+
+## The front door (gt-proxy-1)
+
+| URL | What |
+| --- | --- |
+| `https://<proxy>:8200` | Vault UI + API, writes — the active node only (`/v1/sys/health` = 200) |
+| `https://<proxy>:8202` | Vault reads — any unsealed node (`standbyok&perfstandbyok`) |
+| `https://<proxy>:8210` | the seal Vault (operator only) |
+| `https://<proxy>/` | the console (prompt 08) |
+| `https://<proxy>:8443` | Keycloak, the issuer everyone trusts (prompt 07) |
+| `https://<proxy>:9000/node/<name>/…` | one specific node, also when sealed (diagnosis) |
+| `https://<proxy>:8404/stats` | HAProxy stats, user `stats`, password in `secret/golden-ticket/proxy` |
+
+`make status` prints the node addresses; the proxy address is in
+`terraform -chdir=terraform/infra output -json lab_nodes`. Optional, never
+applied by automation: a Mac `/etc/hosts` line
+`<proxy> vault.golden-ticket.lab ui.golden-ticket.lab id.golden-ticket.lab`
+(the proxy certificate carries those names).
+
+**Failover test** (`make proxy-failover-test`, never part of `make lab`):
+stops Vault on the active node, waits for the front door to serve the new
+leader, starts the node again and waits for three Raft voters. Recorded
+2026-10-08: old active `gt-vault-3` stopped → the front door served
+`gt-vault-1` after about 2 s → `gt-vault-3` came back unsealed (through the
+seal agent) as a standby.

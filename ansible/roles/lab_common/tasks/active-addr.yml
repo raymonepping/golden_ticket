@@ -1,0 +1,32 @@
+---
+# Set lab_common_active_addr to the cluster's ACTIVE node (sys/leader on the
+# first cluster node that answers), so writes never depend on gt-vault-1.
+- name: Ask the cluster nodes for the active node
+  ansible.builtin.uri:
+    url: "https://{{ hostvars[item].ansible_host }}:{{ vault_api_port }}/v1/sys/leader"
+    ca_path: "{{ vault_ca_cert }}"
+    timeout: 5
+  loop: "{{ groups['vault'] | sort }}"
+  register: lab_common_leader
+  failed_when: false
+  check_mode: false
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Remember the active node's address
+  ansible.builtin.set_fact:
+    lab_common_active_addr: >-
+      {{ (lab_common_leader.results | selectattr('json', 'defined') | map(attribute='json')
+          | selectattr('leader_address', 'defined') | map(attribute='leader_address')
+          | reject('equalto', '') | list + ['']) | first }}
+  delegate_to: localhost
+  delegate_facts: true
+  run_once: true
+
+- name: Require an active node
+  ansible.builtin.assert:
+    that: hostvars['localhost'].lab_common_active_addr | length > 0
+    fail_msg: No cluster node reports an active leader (is the seal Vault unsealed? make unseal).
+    quiet: true
+  run_once: true
