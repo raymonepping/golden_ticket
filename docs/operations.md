@@ -55,3 +55,24 @@ what it may do: Terraform's tokens can build structure but never mint a
 secret-id, enable an auth method or read secret data; Ansible's tokens can
 configure people and mint secret-ids but never create a mount or write a
 policy; none can touch the bootstrap policies.
+
+## Drift: who sees what (recorded 2026-10-08)
+
+| Change | Seen by | Result |
+| --- | --- | --- |
+| `vault secrets disable -namespace=operations pki` | Terraform | `make drift`: `platform DRIFT Plan: 1 to add`; validation (check mode) fails too — the mount Terraform declared is missing. `make platform` restores it. |
+| `totp` removed from `var.engines` | Terraform | `vault_mount.engine["totp"] will be destroyed (because key ["totp"] is not in for_each map)`; applied, put back, plan clean. |
+| `secret/` resource block deleted | Terraform plans a destroy — **Vault refuses** | apply → `403 permission denied` (`gt-tf-platform` has no delete on `sys/mounts/secret`); `secret/` still mounted; see decisions D11. |
+| `log_level = "debug"` in `/etc/vault.d/vault.hcl` on `gt-vault-2` | Ansible | `make drift`: `converge DRIFT would change: gt-vault-2=1`; `make converge` renders the file once and try-restarts only `gt-vault-2`. |
+
+`make drift` is read-only: `terraform plan -detailed-exitcode` on every root
+and `--check --diff` on every Ansible phase, one table. `make idempotency`
+really re-runs every Ansible phase and fails on any `changed > 0`.
+
+## Teardown
+
+`make destroy` asks for confirmation (or `CONFIRM_DESTROY=yes`), destroys only
+the `gt-*` VMs through `terraform/infra`, and archives the seal/platform state
+to `.secrets/archive/<timestamp>/` — those Vaults died with their VMs, and the
+critical resources are never `terraform destroy`ed. It prints the reset steps
+for a completely fresh lab. `make rhel-unregister` is separate and explicit.

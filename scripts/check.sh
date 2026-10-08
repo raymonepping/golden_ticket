@@ -34,6 +34,11 @@ for playbook in "${ROOT_DIR}"/ansible/*.yml; do
 done
 info "Playbook syntax valid"
 
+# The gt_stats callback runs inside ansible-playbook: test it with that Python.
+ansible_python="$(head -1 "$(readlink -f "$(command -v ansible-playbook)")" | sed 's/^#!//')"
+"${ansible_python}" -m unittest -q "${ROOT_DIR}/tests/test_gt_stats.py" 2>/dev/null || die "gt_stats callback unit tests failed"
+info "Callback unit tests pass"
+
 (cd "${ROOT_DIR}" && ansible-lint --profile production -q ansible </dev/null) || die "ansible-lint (production profile) failed"
 info "ansible-lint clean (production profile)"
 

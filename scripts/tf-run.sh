@@ -22,6 +22,15 @@ shift 2
 dir="${TF_DIR}/${root}"
 [[ -d "${dir}" ]] || die "Unknown Terraform root: ${root}"
 
+# Evidence for .build/layers.json: last apply / last plan result per root.
+record() {
+  mkdir -p "${BUILD_DIR}/terraform"
+  local f="${BUILD_DIR}/terraform/${root}.json" now
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  [[ -s "${f}" ]] || echo '{}' >"${f}"
+  jq --arg k "$1" --arg v "$2" --arg now "${now}" '.[$k] = {result: $v, at: $now}' "${f}" >"${f}.tmp" && mv "${f}.tmp" "${f}"
+}
+
 secure_state() {
   find "${TF_DIR}" -maxdepth 2 -type f \( -name 'terraform.tfstate' -o -name 'terraform.tfstate.*' \) \
     -exec chmod 600 {} + 2>/dev/null || true
@@ -50,7 +59,10 @@ fi
 case "${action}" in
 init) ;;
 plan) terraform -chdir="${dir}" plan -input=false "$@" ;;
-apply) terraform -chdir="${dir}" apply -input=false -auto-approve "$@" ;;
+apply)
+  terraform -chdir="${dir}" apply -input=false -auto-approve "$@"
+  record last_apply success
+  ;;
 destroy) terraform -chdir="${dir}" destroy -input=false "$@" ;;
 output) terraform -chdir="${dir}" output "$@" ;;
 test) terraform -chdir="${dir}" test "$@" ;;
@@ -60,12 +72,19 @@ drift)
   rc=$?
   set -e
   case "${rc}" in
-  0) info "terraform/${root}: no drift" ;;
+  0)
+    record last_plan clean
+    info "terraform/${root}: no drift"
+    ;;
   2)
+    record last_plan drift
     printf "\033[33mDRIFT:\033[0m terraform/%s — the plan is not empty\n" "${root}" >&2
     exit 2
     ;;
-  *) die "terraform/${root}: plan failed (rc=${rc})" ;;
+  *)
+    record last_plan error
+    die "terraform/${root}: plan failed (rc=${rc})"
+    ;;
   esac
   ;;
 *) die "Unknown action: ${action}" ;;

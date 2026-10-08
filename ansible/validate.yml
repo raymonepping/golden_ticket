@@ -1,0 +1,445 @@
+---
+# validate.yml — read-only readiness contract for the whole estate.
+#
+#   make validate
+#
+# Success is the exit status. A non-secret evidence report is written to
+# .build/validation.json (pass/fail per check, never tokens or raw bodies)
+# before the final assertion, so failures are visible to the console too.
+# Expected platform state comes from Terraform's outputs: Ansible proves what
+# Terraform declared.
+
+- name: Inventory
+  ansible.builtin.import_playbook: preamble.yml
+
+- name: Host evidence on every node
+  hosts: gt
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Read SELinux, swap, firewall, clock and baseline state
+      ansible.builtin.command:
+        argv: "{{ item.argv }}"
+      loop:
+        - { id: selinux, argv: [getenforce] }
+        - { id: swap, argv: [swapon, --show, --noheadings] }
+        - { id: ports, argv: [firewall-cmd, --list-ports] }
+        - { id: rich, argv: [firewall-cmd, --list-rich-rules] }
+        - { id: clock, argv: [chronyc, -c, tracking] }
+        - { id: baseline, argv: [cat, /etc/golden-ticket/baseline] }
+        - { id: service, argv: [systemctl, is-active, vault] }
+      loop_control:
+        label: "{{ item.id }}"
+      register: val_host
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Summarise host evidence
+      ansible.builtin.set_fact:
+        val_node_checks: >-
+          {%- set r = val_host.results -%}
+          {%- set ports = r[2].stdout.split() | sort -%}
+          {%- set expected = firewall_expected_ports[gt_role] | sort -%}
+          {%- set offset = (r[4].stdout.split(',')[4] | default('9') | float | abs) if r[4].rc == 0 else 9 -%}
+          {%- set checks = [
+                {'id': 'selinux', 'label': 'SELinux enforcing',
+                 'status': 'pass' if r[0].stdout == 'Enforcing' else 'fail', 'detail': r[0].stdout},
+                {'id': 'swap', 'label': 'Swap disabled',
+                 'status': 'pass' if r[1].rc == 0 and r[1].stdout | trim == '' else 'fail',
+                 'detail': 'no active swap' if r[1].stdout | trim == '' else 'swap active'},
+                {'id': 'firewall', 'label': 'Firewall opens exactly the role ports',
+                 'status': 'pass' if ports == expected else 'fail',
+                 'detail': (ports | join(' ')) or 'none'},
+                {'id': 'clock', 'label': 'Clock within ' ~ clock_max_offset_seconds ~ ' s of NTP',
+                 'status': 'pass' if offset < clock_max_offset_seconds else 'fail',
+                 'detail': (offset | round(4)) ~ ' s'},
+                {'id': 'baseline', 'label': 'Baseline applied by Terraform is current',
+                 'status': 'pass' if r[5].rc == 0 and r[5].stdout | trim == hostvars['localhost'].val_baseline_digest else 'fail',
+                 'detail': (r[5].stdout | trim)[:12] if r[5].rc == 0 else 'no baseline digest'}] -%}
+          {%- if gt_role in ['cluster', 'seal'] -%}
+          {%- set checks = checks + [{'id': 'service', 'label': 'Vault service active',
+                 'status': 'pass' if r[6].stdout == 'active' else 'fail', 'detail': r[6].stdout}] -%}
+          {%- endif -%}
+          {%- if gt_role == 'agent' -%}
+          {%- set cluster_ips = groups['vault'] | map('extract', hostvars, 'ansible_host') | sort -%}
+          {%- set admitted = r[3].stdout_lines | select('search', 'port="' ~ agent_port ~ '"')
+                 | map('regex_search', 'source address="([0-9.]+)', '\\1') | map('first') | sort -%}
+          {%- set checks = checks + [{'id': 'agent_firewall', 'label': 'Agent port ' ~ agent_port ~ ' admits only the cluster nodes',
+                 'status': 'pass' if admitted == cluster_ips else 'fail', 'detail': admitted | join(' ')}] -%}
+          {%- endif -%}
+          {{ checks }}
+  pre_tasks:
+    - name: Read the baseline digest Terraform applied (infra output)
+      ansible.builtin.command:
+        argv: [terraform, "-chdir={{ tf_dir }}/infra", output, -raw, baseline_digest]
+      delegate_to: localhost
+      become: false
+      run_once: true
+      changed_when: false
+      check_mode: false
+      register: val_baseline_out
+
+    - name: Remember it on localhost
+      ansible.builtin.set_fact:
+        val_baseline_digest: "{{ val_baseline_out.stdout | trim }}"
+      delegate_to: localhost
+      delegate_facts: true
+      run_once: true
+
+- name: Seal agent evidence from a cluster node
+  hosts: vault
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Through the agent with this node's client certificate
+      run_once: true
+      no_log: true
+      ansible.builtin.uri:
+        url: "https://{{ hostvars[agent_node].ansible_host }}:{{ agent_port }}/v1/{{ item }}"
+        ca_path: "{{ vault_tls_dir }}/ca.crt"
+        client_cert: "{{ vault_tls_dir }}/server.crt"
+        client_key: "{{ vault_tls_dir }}/server.key"
+      loop: [auth/token/lookup-self, "{{ seal_transit_mount }}/keys/{{ seal_transit_key }}"]
+      register: val_agent_reads
+      failed_when: false
+      check_mode: false
+
+    - name: Reduce to non-secret facts
+      run_once: true
+      ansible.builtin.set_fact:
+        val_agent:
+          token_ok: "{{ val_agent_reads.results[0].status == 200 and seal_policy_name in (val_agent_reads.results[0].json.data.policies | default([])) }}"
+          ttl: "{{ val_agent_reads.results[0].json.data.ttl | default(0) | int }}"
+          key_ok: "{{ val_agent_reads.results[1].status == 200 }}"
+      delegate_facts: true
+      delegate_to: localhost
+
+    - name: No seal credential file on this node
+      ansible.builtin.stat:
+        path: /etc/vault.d/seal.env
+      register: val_seal_env
+
+    - name: Vault's unit environment holds no token
+      ansible.builtin.command:
+        argv: [systemctl, show, vault, -p, Environment, -p, EnvironmentFiles]
+      register: val_vault_env
+      changed_when: false
+      check_mode: false
+
+    - name: Remember the credential state
+      ansible.builtin.set_fact:
+        val_seal_clean: "{{ not val_seal_env.stat.exists and 'VAULT_TOKEN' not in val_vault_env.stdout }}"
+
+- name: Rotation evidence on the agent
+  hosts: agent
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Read the rotator's last success
+      ansible.builtin.slurp:
+        src: "{{ agent_state_dir }}/rotator-last-success"
+      register: val_rot_last
+      failed_when: false
+
+    - name: Remember the rotation age
+      ansible.builtin.set_fact:
+        val_rot_age_hours: >-
+          {{ ((now(utc=true) - (val_rot_last.content | b64decode | trim | to_datetime('%Y-%m-%dT%H:%M:%SZ'))).total_seconds() / 3600) | round(1)
+             if val_rot_last.content is defined else -1 }}
+
+- name: Vault evidence and report
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Read health and seal status of every Vault node over verified TLS
+      ansible.builtin.uri:
+        url: >-
+          https://{{ hostvars[item].ansible_host }}:{{ vault_api_port }}/v1/sys/{{
+          'health?standbyok=true&perfstandbyok=true' if item != lab_seal_node else 'health' }}
+        ca_path: "{{ vault_ca_cert }}"
+        status_code: [200, 429, 472, 473, 501, 503]
+      loop: "{{ (groups['vault'] + groups['vault_seal']) | sort }}"
+      register: val_health
+      failed_when: false
+      check_mode: false
+
+    - name: Read seal status of every Vault node
+      ansible.builtin.uri:
+        url: "https://{{ hostvars[item].ansible_host }}:{{ vault_api_port }}/v1/sys/seal-status"
+        ca_path: "{{ vault_ca_cert }}"
+      loop: "{{ (groups['vault'] + groups['vault_seal']) | sort }}"
+      register: val_seal
+      failed_when: false
+      check_mode: false
+
+    - name: Find the active node
+      ansible.builtin.uri:
+        url: "https://{{ hostvars[vault_leader].ansible_host }}:{{ vault_api_port }}/v1/sys/leader"
+        ca_path: "{{ vault_ca_cert }}"
+      register: val_leader
+      failed_when: false
+      check_mode: false
+
+    - name: Read Terraform's declared platform state (outputs)
+      ansible.builtin.command:
+        argv: [terraform, "-chdir={{ tf_dir }}/platform", output, -json]
+      register: val_tf_platform
+      changed_when: false
+      check_mode: false
+
+    - name: Address the active node and keep the declared state
+      ansible.builtin.set_fact:
+        val_addr: "{{ val_leader.json.leader_address | default('https://' ~ hostvars[vault_leader].ansible_host ~ ':' ~ vault_api_port) }}"
+        val_declared: "{{ val_tf_platform.stdout | from_json }}"
+
+    - name: Read authenticated cluster evidence (Ansible's own token)
+      ansible.builtin.uri:
+        url: "{{ val_addr }}/v1/{{ item }}"
+        ca_path: "{{ vault_ca_cert }}"
+        headers: { X-Vault-Token: "{{ lookup('file', tokens_dir ~ '/ansible-platform') | trim }}" }
+        method: "{{ 'LIST' if item == 'sys/namespaces' else 'GET' }}"
+      loop: [sys/storage/raft/configuration, sys/license/status, sys/namespaces]
+      register: val_cluster
+      failed_when: false
+      check_mode: false
+      no_log: true
+
+    - name: Read mounts in root and every declared namespace
+      ansible.builtin.uri:
+        url: "{{ val_addr }}/v1/sys/mounts"
+        ca_path: "{{ vault_ca_cert }}"
+        headers: >-
+          {{ {'X-Vault-Token': lookup('file', tokens_dir ~ '/ansible-platform') | trim}
+             | combine({'X-Vault-Namespace': item} if item != 'root' else {}) }}
+      loop: "{{ ['root'] + val_declared.namespaces.value }}"
+      register: val_mounts
+      failed_when: false
+      check_mode: false
+      no_log: true
+
+    - name: Read each declared policy and token role
+      ansible.builtin.uri:
+        url: "{{ val_addr }}/v1/{{ item }}"
+        ca_path: "{{ vault_ca_cert }}"
+        headers: { X-Vault-Token: "{{ lookup('file', tokens_dir ~ '/ansible-platform') | trim }}" }
+        status_code: [200, 404]
+      loop: >-
+        {{ val_declared.policies.value | map('regex_replace', '^', 'sys/policies/acl/') | list
+           + val_declared.token_roles.value | map('regex_replace', '^', 'auth/token/roles/') | list }}
+      register: val_objects
+      failed_when: false
+      check_mode: false
+      no_log: true
+
+    - name: Each bootstrap token holds exactly its policy
+      ansible.builtin.uri:
+        url: >-
+          {{ val_addr if item.vault == 'cluster'
+             else 'https://' ~ hostvars[lab_seal_node].ansible_host ~ ':' ~ vault_api_port }}/v1/auth/token/lookup-self
+        ca_path: "{{ vault_ca_cert }}"
+        headers: { X-Vault-Token: "{{ lookup('file', tokens_dir ~ '/' ~ item.file) | trim }}" }
+      loop: >-
+        {{ seal_bootstrap_tokens | map('combine', {'vault': 'seal'}) | list
+           + cluster_bootstrap_tokens | map('combine', {'vault': 'cluster'}) | list }}
+      loop_control:
+        label: "{{ item.file }}"
+      register: val_tokens
+      failed_when: false
+      check_mode: false
+      no_log: true
+
+    - name: Seal-side evidence (Ansible's seal token)
+      ansible.builtin.uri:
+        url: "https://{{ hostvars[lab_seal_node].ansible_host }}:{{ vault_api_port }}/v1/auth/approle/role/{{ seal_approle }}/secret-id"
+        ca_path: "{{ vault_ca_cert }}"
+        method: LIST
+        headers: { X-Vault-Token: "{{ lookup('file', tokens_dir ~ '/ansible-seal') | trim }}" }
+        status_code: [200, 404]
+      register: val_secret_ids
+      failed_when: false
+      check_mode: false
+      no_log: true
+
+    - name: Reduce authenticated responses to non-secret facts
+      ansible.builtin.set_fact:
+        val_raft_voters: >-
+          {{ (val_cluster.results[0].json.data.config.servers | default([]))
+             | selectattr('voter', 'equalto', true) | map(attribute='node_id') | sort | list }}
+        val_license_ok: >-
+          {{ val_cluster.results[1].status == 200 and
+             (val_cluster.results[1].json.data.autoloading_used | default(false)) and
+             (val_cluster.results[1].json.data.autoloaded.expiration_time | default(''))
+               > now(utc=true).strftime('%Y-%m-%dT%H:%M:%SZ') }}
+        val_license_expiry: "{{ val_cluster.results[1].json.data.autoloaded.expiration_time | default('unknown') }}"
+        val_namespaces: "{{ (val_cluster.results[2].json.data['keys'] | default([])) | map('regex_replace', '/$', '') | list }}"
+        val_actual_mounts: >-
+          {%- set out = {} -%}
+          {%- for r in val_mounts.results -%}
+          {%- for path, m in (r.json.data | default({})).items() -%}
+          {%- set _ = out.update({r.item ~ '/' ~ (path | regex_replace('/$', '')): m.type}) -%}
+          {%- endfor -%}
+          {%- endfor -%}
+          {{ out }}
+        val_missing_objects: "{{ val_objects.results | rejectattr('status', 'equalto', 200) | map(attribute='item') | list }}"
+        val_boundary_rows: >-
+          {%- set out = [] -%}
+          {%- for r in val_tokens.results -%}
+          {%- set got = (r.json.data.policies | default([])) | sort -%}
+          {%- set _ = out.append({'id': r.item.file,
+                'label': r.item.file ~ ' token holds exactly ' ~ r.item.policy,
+                'status': 'pass' if got == (['default', r.item.policy] | sort) else 'fail',
+                'detail': (got | join(', ')) or 'token refused'}) -%}
+          {%- endfor -%}
+          {{ out }}
+        val_secret_id_count: "{{ (val_secret_ids.json.data['keys'] | default([])) | length }}"
+      no_log: true
+
+    - name: Compare declared mounts with what exists
+      ansible.builtin.set_fact:
+        val_mount_problems: >-
+          {%- set out = [] -%}
+          {%- for key, type in val_declared.mounts.value.items() -%}
+          {%- if key not in val_actual_mounts -%}
+          {%- set _ = out.append(key ~ ' missing') -%}
+          {%- elif val_actual_mounts[key] != type -%}
+          {%- set _ = out.append(key ~ ' is ' ~ val_actual_mounts[key] ~ ', expected ' ~ type) -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {{ out }}
+
+    - name: Build per-node Vault evidence
+      ansible.builtin.set_fact:
+        val_nodes: >-
+          {{ val_nodes | default({}) | combine({node: {
+               'role': 'seal' if node == lab_seal_node else 'cluster',
+               'ha_role': ('active' if health.status == 200 and not (health.json.standby | default(true)) else
+                           ('standby' if health.json.standby | default(false) else 'unavailable')),
+               'version': health.json.version | default(''),
+               'checks': (hostvars[node].val_node_checks | default([])) + [
+                 {'id': 'tls', 'label': 'API reachable over verified TLS',
+                  'status': 'pass' if seal.status == 200 else 'fail',
+                  'detail': 'lab CA' if seal.status == 200 else (seal.msg | default('unreachable'))},
+                 {'id': 'initialized', 'label': 'Initialized',
+                  'status': 'pass' if seal.json.initialized | default(false) else 'fail', 'detail': ''},
+                 {'id': 'unsealed', 'label': 'Unsealed',
+                  'status': 'pass' if (seal.json.initialized | default(false)) and not (seal.json.sealed | default(true)) else 'fail',
+                  'detail': ''},
+                 {'id': 'seal_type', 'label': 'Seal type',
+                  'status': 'pass' if seal.json.type | default('') == expected_seal else 'fail',
+                  'detail': (seal.json.type | default('unknown')) ~ ' (expected ' ~ expected_seal ~ ')'}]}}) }}
+      vars:
+        node: "{{ item.0.item }}"
+        health: "{{ item.0 }}"
+        seal: "{{ item.1 }}"
+        expected_seal: "{{ 'shamir' if item.0.item == lab_seal_node else 'transit' }}"
+      loop: "{{ val_health.results | zip(val_seal.results) | list }}"
+      loop_control:
+        label: "{{ item.0.item }}"
+
+    - name: Service nodes carry their host evidence too
+      ansible.builtin.set_fact:
+        val_service_nodes: >-
+          {{ val_service_nodes | default({}) | combine({item: {
+               'role': hostvars[item].gt_role, 'checks': hostvars[item].val_node_checks | default([])}}) }}
+      loop: "{{ groups['agent'] + groups['proxy'] + groups['identity'] + groups['ux'] }}"
+
+    - name: Build the evidence report
+      ansible.builtin.set_fact:
+        validation:
+          generated_at: "{{ now(utc=true).strftime('%Y-%m-%dT%H:%M:%SZ') }}"
+          nodes: "{{ val_nodes }}"
+          service_nodes: "{{ val_service_nodes }}"
+          cluster:
+            - id: active
+              label: Exactly one active cluster node
+              status: >-
+                {{ 'pass' if (val_nodes | dict2items | selectattr('value.role', 'equalto', 'cluster')
+                              | selectattr('value.ha_role', 'equalto', 'active') | list | length) == 1 else 'fail' }}
+              detail: >-
+                {{ val_nodes | dict2items | selectattr('value.ha_role', 'equalto', 'active')
+                   | rejectattr('key', 'equalto', lab_seal_node) | map(attribute='key') | join(', ') }}
+            - id: raft_voters
+              label: Raft voters
+              status: "{{ 'pass' if val_raft_voters == (groups['vault'] | sort) else 'fail' }}"
+              detail: "{{ val_raft_voters | length }} / {{ groups['vault'] | length }}"
+            - id: license
+              label: Enterprise license
+              status: "{{ 'pass' if val_license_ok | bool else 'fail' }}"
+              detail: "expires {{ val_license_expiry }}"
+          platform: >-
+            {{ [{'id': 'namespaces', 'label': 'Namespaces Terraform declared exist',
+                 'status': 'pass' if val_declared.namespaces.value | difference(val_namespaces) | length == 0 else 'fail',
+                 'detail': (val_declared.namespaces.value | difference(val_namespaces) | join(', ')) or (val_declared.namespaces.value | join(', '))},
+                {'id': 'mounts', 'label': 'Mounts Terraform declared exist with their type',
+                 'status': 'pass' if val_mount_problems | length == 0 else 'fail',
+                 'detail': (val_mount_problems | join('; ')) or ((val_declared.mounts.value | length) ~ ' declared, all present')},
+                {'id': 'policies_roles', 'label': 'Policies and token roles Terraform declared exist',
+                 'status': 'pass' if val_missing_objects | length == 0 else 'fail',
+                 'detail': ('missing: ' ~ (val_missing_objects | join(', '))) if val_missing_objects
+                           else (val_declared.policies.value | length) ~ ' policies, '
+                                ~ (val_declared.token_roles.value | length) ~ ' token role(s)'}] }}
+          boundary: "{{ val_boundary_rows }}"
+          identity: []
+          front_door: []
+          seal_chain: >-
+            {{ [{'id': 'seal_key', 'label': 'Transit key autounseal present',
+                 'status': 'pass' if val_agent.key_ok | bool else 'fail',
+                 'detail': lab_seal_node ~ ':' ~ seal_transit_mount ~ '/keys/' ~ seal_transit_key},
+                {'id': 'agent_token', 'label': 'Seal agent holds an autounseal token',
+                 'status': 'pass' if val_agent.token_ok | bool and val_agent.ttl | int > 0 else 'fail',
+                 'detail': ((val_agent.ttl | int) / 60) | round(0) | int ~ ' min left (renewed and re-issued by the agent)'},
+                {'id': 'rotator', 'label': 'Secret-id rotated within ' ~ rotation_max_age_hours ~ ' h',
+                 'status': 'pass' if (hostvars[agent_node].val_rot_age_hours | float) >= 0
+                           and (hostvars[agent_node].val_rot_age_hours | float) < rotation_max_age_hours else 'fail',
+                 'detail': ('last rotation ' ~ hostvars[agent_node].val_rot_age_hours ~ ' h ago')
+                           if (hostvars[agent_node].val_rot_age_hours | float) >= 0 else 'never rotated'},
+                {'id': 'one_secret_id', 'label': 'Exactly one valid agent secret-id',
+                 'status': 'pass' if val_secret_id_count | int == 1 else 'fail',
+                 'detail': val_secret_id_count ~ ' valid'},
+                {'id': 'no_seal_credential', 'label': 'No seal credential on cluster nodes',
+                 'status': 'pass' if groups['vault'] | map('extract', hostvars, 'val_seal_clean') | select('equalto', false) | list | length == 0 else 'fail',
+                 'detail': 'no seal.env, no VAULT_TOKEN in the vault unit'}] }}
+
+    - name: Ensure the gates directory exists
+      ansible.builtin.file:
+        path: "{{ build_dir }}/gates"
+        state: directory
+        mode: "0755"
+      check_mode: false
+
+    - name: Write the non-secret evidence report
+      ansible.builtin.copy:
+        content: "{{ validation | to_nice_json(sort_keys=true) }}\n"
+        dest: "{{ validation_report }}"
+        mode: "0644"
+      check_mode: false
+      changed_when: false
+
+    - name: Collect failed checks
+      ansible.builtin.set_fact:
+        val_failures: >-
+          {{ (val_nodes | dict2items | map(attribute='value.checks') | flatten
+              | selectattr('status', 'equalto', 'fail') | map(attribute='label') | list)
+             + (val_service_nodes | dict2items | map(attribute='value.checks') | flatten
+              | selectattr('status', 'equalto', 'fail') | map(attribute='label') | list)
+             + ([validation.cluster, validation.platform, validation.boundary, validation.seal_chain,
+                 validation.identity, validation.front_door] | flatten
+                | selectattr('status', 'equalto', 'fail') | map(attribute='label') | list) }}
+
+    - name: Record the validation gate (non-secret)
+      ansible.builtin.copy:
+        content: >-
+          {{ {'gate': 'validation', 'result': 'pass' if val_failures | length == 0 else 'fail',
+              'failed': val_failures | unique, 'at': validation.generated_at} | to_nice_json }}
+        dest: "{{ build_dir }}/gates/validation.json"
+        mode: "0644"
+      check_mode: false
+      changed_when: false
+
+    - name: Require every check to pass
+      ansible.builtin.assert:
+        that: val_failures | length == 0
+        fail_msg: "Failed checks: {{ val_failures | unique | join('; ') }} (details in .build/validation.json)"
+        success_msg: "All validation checks passed ({{ validation_report }})"

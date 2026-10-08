@@ -47,10 +47,8 @@ baseline: ## Run the RHEL baseline from Make (Terraform inventory) — expect ch
 baseline-rerun: ## Force Terraform to re-run the baseline (the only forced run)
 	$(TF) infra apply -parallelism=$(INFRA_PARALLELISM) -replace=ansible_playbook.baseline
 
-destroy: ## Destroy ONLY the gt-* VMs (Terraform confirmation)
-	@echo "Terraform will propose destroying only the gt-* VMs in terraform/infra."
-	@echo "Consider 'CONFIRM_RHSM_UNREGISTER=yes make rhel-unregister' first."
-	$(TF) infra destroy
+destroy: ## Destroy ONLY the gt-* VMs (confirmation), archive the Vault roots' state
+	./scripts/destroy.sh
 
 rhel-unregister: ## Unregister the gt-* guests from RHSM (CONFIRM_RHSM_UNREGISTER=yes)
 	$(RUN) rhel-unregister
@@ -91,3 +89,33 @@ bootstrap: ## Ansible: start the cluster, init (recovery keys), raft join, tf-pl
 seal-rotate: ## Rotate the seal agent's secret-id now (normally on the wall-clock schedule)
 	multipass exec gt-agent-1 -- sudo systemctl start seal-rotator.service
 	multipass exec gt-agent-1 -- sudo journalctl -u seal-rotator -n 3 --no-pager -o cat
+
+# ── Vault structure, validation and the whole lab (prompt 05) ────────────────
+.PHONY: platform-plan platform validate lab idempotency drift secret-scan digest layers
+
+platform-plan: ## Plan the cluster's structure (gt-tf-platform token, active node)
+	$(TF) platform plan
+
+platform: ## Terraform: namespaces, mounts, secret/, engines, policies, token roles
+	$(TF) platform apply
+
+validate: ## Ansible: read-only end-to-end proof → .build/validation.json
+	$(RUN) validate
+
+lab: ## The whole lab: every phase of scripts/phases.txt, then idempotency, drift, secret scan, stamp
+	./scripts/lab.sh
+
+idempotency: ## Re-run every Ansible phase; each must report changed=0
+	./scripts/idempotency.sh
+
+drift: ## Read-only: terraform plan -detailed-exitcode per root + ansible --check per phase
+	./scripts/drift.sh
+
+secret-scan: ## Known secret values and secret-shaped patterns in state, .build/ and logs
+	./scripts/secret-scan.sh
+
+digest: ## Print the automation digest
+	@./scripts/automation-digest.sh
+
+layers: ## Rebuild .build/layers.json from the evidence
+	./scripts/layers.sh

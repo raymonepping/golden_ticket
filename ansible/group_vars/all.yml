@@ -107,3 +107,17 @@ seal_rotate_every: 6h
 # Wall-clock slots (00/06/12/18 h) with Persistent=true: a monotonic interval
 # stands still while the Mac sleeps (red_pass c6fc9de).
 seal_rotate_calendar: "*-*-* 00/6:00:00"
+
+# ── Validation ───────────────────────────────────────────────────────────────
+validation_report: "{{ build_dir }}/validation.json"
+# Exact firewalld --list-ports per role (source-restricted ports are rich
+# rules and are checked separately). Prompts 06–08 add proxy/identity/ux.
+firewall_expected_ports:
+  cluster: [8200/tcp, 8201/tcp]
+  seal: [8200/tcp, 8201/tcp]
+  agent: []
+  proxy: []
+  identity: []
+  ux: []
+clock_max_offset_seconds: 1.0
+rotation_max_age_hours: 7

@@ -1,0 +1,11 @@
+# The only phase list. One phase per line: <tool> <name>.
+# Read by scripts/lab.sh, idempotency.sh, drift.sh, layers.sh, the automation
+# digest and the console. tf = a Terraform root, ansible = a playbook.
+tf infra
+ansible converge
+ansible seal-init
+tf seal
+ansible agent
+ansible bootstrap
+tf platform
+ansible validate

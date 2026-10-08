@@ -19,6 +19,14 @@ path "sys/mounts/*" {
   capabilities = ["create", "read", "update", "delete"]
 }
 
+# secret/ holds the generated identity/proxy secrets: Terraform may create and
+# tune it, never delete it. prevent_destroy alone is not enough — deleting
+# the resource block deletes the protection with it (docs/decisions.md D11).
+# The most specific path wins, so this denies delete on secret/ only.
+path "sys/mounts/secret" {
+  capabilities = ["create", "read", "update"]
+}
+
 path "+/sys/mounts" {
   capabilities = ["read"]
 }
@@ -45,6 +53,15 @@ path "auth/token/roles" {
 
 path "auth/token/roles/*" {
   capabilities = ["create", "read", "update", "delete"]
+}
+
+# Named Transit keys in a namespace (structure only: never encrypt/decrypt).
+path "+/transit/keys/*" {
+  capabilities = ["create", "read", "update", "delete"]
+}
+
+path "+/transit/keys/+/config" {
+  capabilities = ["create", "read", "update"]
 }
 
 path "sys/license/status" {

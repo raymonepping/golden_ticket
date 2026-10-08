@@ -45,6 +45,7 @@ fi
 targets=("$@")
 if [[ ${#targets[@]} -eq 0 ]]; then
   targets=("${BUILD_DIR}")
+  while IFS= read -r f; do targets+=("${f}"); done < <(find "${CACHE_DIR}" -maxdepth 1 -name '*.log' 2>/dev/null)
   while IFS= read -r f; do targets+=("${f}"); done < <(
     find "${TF_DIR}" "${SECRETS_DIR}/archive" -type f \( -name '*.tfstate' -o -name '*.tfstate.*' \) 2>/dev/null
   )
@@ -68,5 +69,9 @@ for pattern in "${patterns[@]}"; do
     hits=$((hits + 1))
   fi
 done
+mkdir -p "${BUILD_DIR}/gates"
+jq -n --arg result "$([[ ${hits} -eq 0 ]] && echo pass || echo fail)" --argjson values "${#values[@]}" \
+  --argjson targets "${#targets[@]}" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  '{gate: "secret-scan", result: $result, known_values: $values, targets: $targets, at: $at}' >"${BUILD_DIR}/gates/secret-scan.json"
 [[ ${hits} -eq 0 ]] || die "${hits} secret finding(s)."
 info "Secret scan clean: ${#values[@]} known values + ${#patterns[@]} patterns over ${#targets[@]} target(s)"

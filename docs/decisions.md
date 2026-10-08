@@ -132,3 +132,47 @@ provider normalises the stored value) and the warning is gone.
 
 **Decision.** `terraform/seal` writes `/32` for both lists. Ansible validation
 normalises before comparing (as red_pass does).
+
+## D9 — Licence features from Vault, licence metadata in state (2026-10-08)
+
+**Question.** Can `terraform/platform` choose the licensed Enterprise
+engines from `sys/license/status` without the licence entering state?
+
+**Observed.** `sys/license/status` returns `autoloaded.{features,
+expiration_time, license_id, edition, …}` — no licence blob (checked for the
+licence prefix: 0 hits). The provider marks `data_json` sensitive, which hides
+it from output but still stores it in state.
+
+**Decision.** `data "vault_generic_secret" "license"` is read; only the
+feature names are unmarked with `nonsensitive()` to drive `for_each`. The
+platform state therefore holds licence **metadata** (feature names, expiry,
+licence id), never the licence; the secret scan checks for the licence
+prefix in every state file.
+
+## D10 — Check blocks: no scoped data source (2026-10-08)
+
+**Observed.** With `data "http"` nested inside `check "cluster_healthy"`,
+every plan showed `data.http.health will be read during apply (config will be
+reloaded to verify a check block)` and `plan -detailed-exitcode` returned 2:
+the drift gate could never be green.
+
+**Decision.** The HTTP read is a normal data source (read during plan); the
+`check` block keeps only the `assert`, so it still warns without blocking.
+
+## D11 — `prevent_destroy` is not protection on its own (2026-10-08)
+
+**Observed (drift demo 3).**
+- Changing the `secret` mount's path is not a replacement: the provider
+  remounts in place, so `prevent_destroy` never fires.
+- Deleting the whole `resource "vault_mount" "secret"` block plans a destroy
+  ("not in configuration"): the protection lived in the block that was
+  deleted.
+
+**Decision.** Protection comes from Vault, like the rest of the tool
+boundary: `gt-tf-platform` has `create/read/update` (no `delete`) on
+`sys/mounts/secret` and no `sys/remount`. Proof: block deleted → apply →
+`403 permission denied`, `secret/` still mounted (kv v2), code restored →
+plan clean (after one apply to refresh the outputs the failed apply had
+saved). On the seal Vault, `gt-tf-seal` likewise has no delete on
+`sys/mounts/transit` and none on the key. `prevent_destroy` stays as the
+first, friendlier line of defence.

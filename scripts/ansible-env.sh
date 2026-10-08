@@ -57,6 +57,9 @@ export ANSIBLE_GALAXY_TOKEN_PATH="${CACHE_DIR}/ansible/galaxy_token"
 # Absolute paths: the baseline playbook also runs as a subprocess of
 # `terraform -chdir=terraform/infra apply`, whose working directory differs.
 export ANSIBLE_ROLES_PATH="${ROOT_DIR}/ansible/roles"
+export ANSIBLE_CALLBACK_PLUGINS="${ROOT_DIR}/ansible/plugins/callback"
+# gt_stats writes the recap counts of a phase here (GT_PHASE set by ansible-run.sh).
+export GT_STATS_DIR="${BUILD_DIR}/ansible-stats"
 if [[ -f "${TF_DIR}/infra/terraform.tfstate" ]]; then
   export ANSIBLE_INVENTORY="${ROOT_DIR}/ansible/inventory/localhost.yml,${CACHE_DIR}/ansible/inventory/terraform.yml"
 else
