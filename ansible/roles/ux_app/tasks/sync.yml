@@ -3,6 +3,8 @@
 # Terraform's contract: the lab_nodes and baseline_digest outputs of
 # terraform/infra, wrapped as ownership.json. The automation digest is
 # computed on the controller now, with the same script make lab uses.
+# Evidence is not configuration: the pushes are skipped in check mode, so
+# `make drift` on the console reports only real configuration drift.
 
 - name: Read Terraform's contract and compute the digest (controller)
   ansible.builtin.command:
@@ -22,6 +24,7 @@
   run_once: true
 
 - name: Push Terraform's contract as ownership.json and the engines plan
+  when: not ansible_check_mode
   ansible.builtin.copy:
     content: "{{ item.content | to_nice_json(sort_keys=true) }}\n"
     dest: "{{ ux_evidence_dir }}/{{ item.file }}"
@@ -50,6 +53,7 @@
   run_once: true
 
 - name: Push the evidence files
+  when: not ansible_check_mode
   ansible.builtin.copy:
     src: "{{ item.stat.path }}"
     dest: "{{ ux_evidence_dir }}/{{ item.item }}"
@@ -61,6 +65,7 @@
     label: "{{ item.item }}"
 
 - name: Push the automation digest
+  when: not ansible_check_mode
   ansible.builtin.copy:
     content: "{{ ux_app_sync_reads.results[3].stdout | trim }}\n"
     dest: "{{ ux_evidence_dir }}/automation-digest.txt"

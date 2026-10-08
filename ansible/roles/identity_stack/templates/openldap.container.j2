@@ -26,8 +26,10 @@ Environment=LDAP_TLS_KEY_FILENAME=server.key
 Environment=LDAP_TLS_CA_CRT_FILENAME=ca.crt
 Environment=LDAP_TLS_VERIFY_CLIENT=never
 Environment=LDAP_TLS_ENFORCE=false
-Secret=ldap-admin-password
-Secret=ldap-readonly-password
+# Root-only inside the container (Podman's default is 0444): the image reads
+# these as root at startup.
+Secret=ldap-admin-password,mode=0400
+Secret=ldap-readonly-password,mode=0400
 
 [Service]
 Restart=on-failure

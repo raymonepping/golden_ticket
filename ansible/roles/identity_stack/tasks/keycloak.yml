@@ -16,8 +16,35 @@
     ssl_required: external
     state: present
   no_log: true
+  register: identity_stack_realm
 
+# keycloak_realm always PUTs an existing realm and reports "changed" when the
+# realm differs afterwards. The first PUT after creation makes Keycloak fill
+# in defaults, so a fresh realm reported one change on the next run (found by
+# the from-nothing rebuild's idempotency gate). Settle it in the same run,
+# only when this run created the realm.
+- name: Settle a newly created realm (Keycloak fills in defaults on first update)
+  when: not ansible_check_mode and not identity_stack_realm.existing
+  community.general.keycloak_realm:
+    auth_keycloak_url: "{{ keycloak_public_url }}"
+    auth_realm: master
+    auth_username: admin
+    auth_password: "{{ identity_stack_secrets.keycloak_admin_password }}"
+    id: "{{ identity_realm }}"
+    realm: "{{ identity_realm }}"
+    display_name: golden_ticket
+    enabled: true
+    ssl_required: external
+    state: present
+  changed_when: false
+  no_log: true
+
+# community.general.keycloak_user_federation reports "changed" in check mode
+# on a converged realm (a real run reports ok), so check mode cannot prove
+# it: skipped there, covered by the idempotency gate (real re-run,
+# changed=0) — docs/decisions.md D14.
 - name: Federate the directory (read-only) with a group mapper
+  when: not ansible_check_mode
   community.general.keycloak_user_federation:
     auth_keycloak_url: "{{ keycloak_public_url }}"
     auth_realm: master

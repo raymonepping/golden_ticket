@@ -189,3 +189,31 @@ token-role metadata.
 variable that could hold a secret; secrets go only in `headers`/`body` values.
 Role-prefixed variable names (ansible-lint `var-naming[no-role-prefix]`)
 prevent the collision that caused this; the secret scan covers the logs.
+
+## D13 — Sizing drift is invisible to the Multipass provider (2026-10-08)
+
+**Observed (drift proof).** `multipass set local.gt-ux-1.memory=3G` (VM
+stopped, started again; the guest then had 2.8 GiB): `terraform plan` on
+`terraform/infra` reported **No changes** — `todoroff/multipass` 1.7.1 does
+not refresh `memory` (state kept `2G`). Terraform cannot see this drift.
+
+**Decision.** Ansible proves what the provider cannot read: `validate.yml`
+compares each node's live CPU count (`nproc`) and memory (`MemTotal`) with
+the `cpus`/`memory` host variables Terraform declared in the inventory
+(`sizing` row, every node). The guest sees slightly less memory than
+configured (80–100 % accepted), never more.
+
+## D14 — What check mode cannot prove (2026-10-08)
+
+**Observed.** On a converged lab, `--check` over `identity` reported the
+LDAP federation task (`community.general.keycloak_user_federation`) as
+changed, while a real run reported `ok`; `--check` over `ux` reported the
+evidence pushes as changed because evidence (validation report, digest) is
+regenerated between runs.
+
+**Decision.** Check mode is for configuration drift. The federation task and
+the evidence pushes are skipped in check mode, each with a comment; both are
+still covered by the idempotency gate (a real re-run of every phase, changed=0,
+the evidence sync on the documented allow list). A real hand change in
+Keycloak (a stray web origin on `gt-ui`) is still caught by check mode on the
+client task, and restored by `make identity`.

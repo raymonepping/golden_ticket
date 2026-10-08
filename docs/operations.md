@@ -129,3 +129,58 @@ axe WCAG 2.1 AA on every page at 1440×900 and 390×844: 0 violations) and
 The probe key works only as a forced command from gt-ux-1: from the Mac it is
 refused; from gt-ux-1 any command returns the probe output; a port forward is
 refused ("administratively prohibited").
+
+## Proofs (prompt 09, recorded 2026-10-08)
+
+### Resilience
+
+| Proof | Command | Result |
+| --- | --- | --- |
+| Leader failover | `make proxy-failover-test` | front door served the new leader ~2 s after the active node stopped; the old leader rejoined unsealed as a standby |
+| Node reboot | `multipass restart gt-vault-2` | back unsealed by itself through the agent (boot confirmed with `uptime -s`) |
+| Agent restart | `multipass restart gt-agent-1` while polling every node each second | 180 / 180 health checks 200; the agent re-authenticated |
+| Rotation | `make rotation-proof` | old secret-id login 200 → after two rotations 400; current 200; exactly one valid secret-id |
+| Seal Vault restart | `multipass restart gt-vault-s` → `make unseal` | came back sealed; the cluster kept answering 200; one key unsealed it |
+| Cold start | stop all eight → start → `make unseal` | (prompt 04) cluster nodes waited in `activating`; ~19 s after `make unseal` all three unsealed |
+| Mac sleep | sleep the Mac ≥ 10 min, wake | **operator-run** — needs the Mac itself to sleep; chrony `makestep 1.0 -1` + `waitsync` and certificates with notBefore −1 h are in place |
+| Sleep across a rotation slot | sleep past 00/06/12/18 h, wake | **operator-run** — the timer is `OnCalendar=*-*-* 00/6:00:00` with `Persistent=true` (verified with `systemctl cat`); validation's "rotated within 7 h" proves the catch-up |
+
+### Drift, one per tool
+
+| Change | Seen by | Result |
+| --- | --- | --- |
+| Mount disabled by hand | Terraform | platform plan: 1 to add; `make platform` restores (prompt 05) |
+| Mount removed from code | Terraform | plan shows the destroy (prompt 05) |
+| `secret/` block removed from code | Terraform plans it — **Vault refuses** | 403; mount survives (D11) |
+| VM deleted outside Terraform (`multipass delete --purge gt-ux-1`, after `rhel-unregister` for that node) | Terraform | infra plan: create `gt-ux-1`, update its inventory host, re-run the baseline; `make lab` rebuilt and re-furnished it on a new address and propagated it (proxy, Keycloak, token role, probe key) |
+| VM resized by hand (`memory=3G`) | **not Terraform** (provider does not refresh sizing) — **Ansible** | plan stayed empty; `make validate` failed "Sizing matches Terraform" on `gt-ux-1` only; reverted → pass (D13) |
+| `vault.hcl` edited on a node | Ansible | check mode on `converge`; `make converge` restores with one try-restart (prompt 05) |
+| Keycloak client changed in the admin API (stray web origin on `gt-ui`) | Ansible | check mode: "Ensure the OIDC clients" would change; `make identity` restored it |
+| Person added to another LDAP group (`viewer` → `gt-operators`) | Vault + validation | `identity-verify` failed exactly: viewer JWT and LDAP logins `gt-operator,gt-viewer`, viewer KV write HTTP 200; `make identity` restored exact membership → 11/11 |
+
+### From nothing (final gate, 2026-10-08)
+
+`make rhel-unregister` → `make destroy` → reset steps → `make lab`, green in
+17 min 12 s (phase start to next phase start):
+
+| Phase | Tool | Time |
+|---|---|---|
+| infra: preflight, image clones, 8 VMs, RHEL baseline | Terraform (+ Ansible inside) | 6 min 05 s |
+| converge | Ansible | 58 s |
+| seal-init | Ansible | 23 s |
+| seal | Terraform | 2 s |
+| agent | Ansible | 24 s |
+| bootstrap | Ansible | 35 s |
+| platform | Terraform | 2 s |
+| proxy | Ansible | 23 s |
+| identity | Ansible | 2 min 20 s |
+| ux (including the console build) | Ansible | 1 min |
+| validate | Ansible | 57 s |
+| gates: idempotency, drift, secret scan | both | 4 min |
+| **total** | | **17 min 12 s** |
+
+The first two from-nothing attempts failed on bugs no converged re-run could
+show (Vault restart handler on a missing unit; OpenLDAP certificate
+directory owner; first update of a new Keycloak realm); see
+[lessons-learned.md](lessons-learned.md). The third attempt above ran after
+the fixes, from a fresh destroy.

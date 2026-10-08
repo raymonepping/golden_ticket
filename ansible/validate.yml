@@ -28,6 +28,8 @@
         - { id: clock, argv: [chronyc, -c, tracking] }
         - { id: baseline, argv: [cat, /etc/golden-ticket/baseline] }
         - { id: service, argv: [systemctl, is-active, vault] }
+        - { id: nproc, argv: [nproc] }
+        - { id: memkb, argv: [awk, '/^MemTotal:/ { print $2 }', /proc/meminfo] }
       loop_control:
         label: "{{ item.id }}"
       register: val_host
@@ -42,6 +44,13 @@
           {%- set ports = r[2].stdout.split() | sort -%}
           {%- set expected = firewall_expected_ports[gt_role] | sort -%}
           {%- set offset = (r[4].stdout.split(',')[4] | default('9') | float | abs) if r[4].rc == 0 else 9 -%}
+          {#- The Multipass provider does not refresh sizing from the live VM
+              (docs/decisions.md D13): Ansible checks it against the
+              Terraform inventory. The guest sees a little less than the
+              configured memory (firmware, kernel), never more. -#}
+          {%- set mem_gib = (r[8].stdout | int) / 1048576 -%}
+          {%- set declared = memory | regex_replace('G$', '') | float -%}
+          {%- set sizing_ok = (r[7].stdout | int) == (cpus | int) and mem_gib <= declared and mem_gib >= declared * 0.8 -%}
           {%- set checks = [
                 {'id': 'selinux', 'label': 'SELinux enforcing',
                  'status': 'pass' if r[0].stdout == 'Enforcing' else 'fail', 'detail': r[0].stdout},
@@ -54,6 +63,9 @@
                 {'id': 'clock', 'label': 'Clock within ' ~ clock_max_offset_seconds ~ ' s of NTP',
                  'status': 'pass' if offset < clock_max_offset_seconds else 'fail',
                  'detail': (offset | round(4)) ~ ' s'},
+                {'id': 'sizing', 'label': 'Sizing matches Terraform (CPUs, memory)',
+                 'status': 'pass' if sizing_ok else 'fail',
+                 'detail': r[7].stdout ~ ' CPU / ' ~ (mem_gib | round(1)) ~ ' GiB live; Terraform declares ' ~ cpus ~ ' CPU / ' ~ memory},
                 {'id': 'baseline', 'label': 'Baseline applied by Terraform is current',
                  'status': 'pass' if r[5].rc == 0 and r[5].stdout | trim == hostvars['localhost'].val_baseline_digest else 'fail',
                  'detail': (r[5].stdout | trim)[:12] if r[5].rc == 0 else 'no baseline digest'}] -%}

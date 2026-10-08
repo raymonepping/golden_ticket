@@ -18,13 +18,15 @@
     path: "{{ item.path }}"
     state: directory
     owner: "{{ item.owner | default('root') }}"
-    group: root
+    group: "{{ item.owner | default('root') }}"
     mode: "{{ item.mode }}"
   loop:
     - { path: "{{ identity_conf_dir }}", mode: "0755" }
     - { path: "{{ identity_conf_dir }}/tls", mode: "0755" }
     - { path: "{{ identity_conf_dir }}/tls/keycloak", mode: "0755" }
-    - { path: "{{ identity_conf_dir }}/tls/ldap", mode: "0755" }
+    # The OpenLDAP image chowns its certificate directory to its openldap
+    # user (uid 911) on every start; declare that, or each restart is drift.
+    - { path: "{{ identity_conf_dir }}/tls/ldap", mode: "0755", owner: "911" }
     - { path: /etc/containers/systemd, mode: "0755" }
 
 # ── TLS from the lab CA ──────────────────────────────────────────────────────

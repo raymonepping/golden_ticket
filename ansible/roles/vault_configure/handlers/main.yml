@@ -10,5 +10,8 @@
   ansible.builtin.command:
     argv: [systemctl, try-restart, vault]
   throttle: 1
-  changed_when: true
+  # rc 5: the unit is not installed yet (first converge), nothing to restart.
+  register: vault_configure_try_restart
+  changed_when: vault_configure_try_restart.rc == 0
+  failed_when: vault_configure_try_restart.rc not in [0, 5]
   listen: Restart vault

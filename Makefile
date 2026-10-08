@@ -72,7 +72,7 @@ boundary: ## Prove each bootstrap token can do only its own tool's job (sys/capa
 	./scripts/boundary-check.sh
 
 # ── The seal chain (prompt 04) ───────────────────────────────────────────────
-.PHONY: seal-plan seal agent bootstrap seal-rotate
+.PHONY: seal-plan seal agent bootstrap seal-rotate rotation-proof
 
 seal-plan: ## Plan the seal Vault's structure (gt-tf-seal token)
 	$(TF) seal plan
@@ -85,6 +85,9 @@ agent: ## Ansible: secret-ids, Vault Agent (mTLS proxy) + rotator, proven from a
 
 bootstrap: ## Ansible: start the cluster, init (recovery keys), raft join, tf-platform + ansible-platform tokens
 	$(RUN) bootstrap
+
+rotation-proof: ## Rotate twice: the old secret-id dies, the current works, exactly one is valid (changes state)
+	./scripts/rotation-proof.sh
 
 seal-rotate: ## Rotate the seal agent's secret-id now (normally on the wall-clock schedule)
 	multipass exec gt-agent-1 -- sudo systemctl start seal-rotator.service
