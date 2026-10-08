@@ -1,0 +1,76 @@
+---
+# Directory content: OUs, people, groups (groupOfNames), and passwords from
+# Vault KV. Runs on the identity node against the loopback-only 389.
+
+- name: Ensure the organisational units
+  community.general.ldap_entry:
+    server_uri: ldap://127.0.0.1:389
+    bind_dn: "cn=admin,{{ identity_base_dn }}"
+    bind_pw: "{{ identity_stack_secrets.ldap_admin_password }}"
+    dn: "ou={{ item }},{{ identity_base_dn }}"
+    objectClass: [organizationalUnit]
+    attributes: { ou: "{{ item }}" }
+  loop: [people, groups]
+  no_log: true
+
+- name: Ensure the people
+  community.general.ldap_entry:
+    server_uri: ldap://127.0.0.1:389
+    bind_dn: "cn=admin,{{ identity_base_dn }}"
+    bind_pw: "{{ identity_stack_secrets.ldap_admin_password }}"
+    dn: "uid={{ item.uid }},ou=people,{{ identity_base_dn }}"
+    objectClass: [inetOrgPerson, organizationalPerson, person]
+    attributes:
+      uid: "{{ item.uid }}"
+      cn: "{{ item.cn }}"
+      sn: "{{ item.sn }}"
+      mail: "{{ item.uid }}@{{ identity_domain }}"
+  loop: "{{ identity_users }}"
+  loop_control:
+    label: "{{ item.uid }}"
+  no_log: true
+
+- name: Ensure each person's password (from Vault KV)
+  community.general.ldap_passwd:
+    server_uri: ldap://127.0.0.1:389
+    bind_dn: "cn=admin,{{ identity_base_dn }}"
+    bind_pw: "{{ identity_stack_secrets.ldap_admin_password }}"
+    dn: "uid={{ item.uid }},ou=people,{{ identity_base_dn }}"
+    passwd: "{{ identity_stack_secrets['user_' ~ item.uid] }}"
+  loop: "{{ identity_users }}"
+  loop_control:
+    label: "{{ item.uid }}"
+  no_log: true
+
+- name: Ensure the groups exist
+  community.general.ldap_entry:
+    server_uri: ldap://127.0.0.1:389
+    bind_dn: "cn=admin,{{ identity_base_dn }}"
+    bind_pw: "{{ identity_stack_secrets.ldap_admin_password }}"
+    dn: "cn={{ item.key }},ou=groups,{{ identity_base_dn }}"
+    objectClass: [groupOfNames]
+    attributes:
+      cn: "{{ item.key }}"
+      member: >-
+        {{ identity_users | selectattr('group', 'equalto', item.key) | map(attribute='uid')
+           | map('regex_replace', '^(.*)$', 'uid=\1,ou=people,' ~ identity_base_dn) | list }}
+  loop: "{{ identity_groups | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  no_log: true
+
+- name: Keep group membership exactly as declared
+  community.general.ldap_attrs:
+    server_uri: ldap://127.0.0.1:389
+    bind_dn: "cn=admin,{{ identity_base_dn }}"
+    bind_pw: "{{ identity_stack_secrets.ldap_admin_password }}"
+    dn: "cn={{ item.key }},ou=groups,{{ identity_base_dn }}"
+    attributes:
+      member: >-
+        {{ identity_users | selectattr('group', 'equalto', item.key) | map(attribute='uid')
+           | map('regex_replace', '^(.*)$', 'uid=\1,ou=people,' ~ identity_base_dn) | list }}
+    state: exact
+  loop: "{{ identity_groups | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  no_log: true

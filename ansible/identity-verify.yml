@@ -1,0 +1,29 @@
+---
+# identity-verify.yml — prove every person end to end (make identity-verify).
+- name: Inventory
+  ansible.builtin.import_playbook: preamble.yml
+
+- name: Verify identity
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Read the identity secrets
+      ansible.builtin.include_role:
+        name: identity_secrets
+
+    - name: Exercise every person
+      ansible.builtin.include_role:
+        name: identity_verify
+
+    - name: Show the result (no secrets)
+      ansible.builtin.debug:
+        msg: >-
+          {{ identity_verify_report | map(attribute='status') | zip(identity_verify_report | map(attribute='label'),
+             identity_verify_report | map(attribute='detail')) | map('join', '  ') | list }}
+
+    - name: Require every identity check to pass
+      ansible.builtin.assert:
+        that: identity_verify_report | selectattr('status', 'ne', 'pass') | list | length == 0
+        fail_msg: "Failed: {{ identity_verify_report | selectattr('status', 'ne', 'pass') | map(attribute='label') | join('; ') }}"
+        quiet: true

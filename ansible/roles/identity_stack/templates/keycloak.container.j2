@@ -1,0 +1,31 @@
+# {{ ansible_managed }}
+[Unit]
+Description=golden_ticket Keycloak (realm {{ identity_realm }})
+After=openldap.service
+Wants=openldap.service
+
+[Container]
+Image={{ keycloak_image }}
+ContainerName=keycloak
+# Host networking (see openldap.container): 8443 only from the front door,
+# management 9000 never opened.
+Network=host
+Volume=gt-keycloak-data:/opt/keycloak/data:Z
+Volume={{ identity_conf_dir }}/tls/keycloak:/etc/x509/https:ro,Z
+Environment=KC_BOOTSTRAP_ADMIN_USERNAME=admin
+Secret=keycloak-admin-password,type=env,target=KC_BOOTSTRAP_ADMIN_PASSWORD
+Exec=start \
+  --hostname={{ keycloak_public_url }} \
+  --https-certificate-file=/etc/x509/https/server.crt \
+  --https-certificate-key-file=/etc/x509/https/server.key \
+  --http-enabled=false \
+  --health-enabled=true \
+  --proxy-headers=xforwarded \
+  --db=dev-file
+
+[Service]
+Restart=on-failure
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target

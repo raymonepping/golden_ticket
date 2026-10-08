@@ -1,0 +1,268 @@
+---
+# Vault trusts people: auth/oidc (Keycloak browser/CLI flow), auth/jwt
+# (Keycloak tokens presented directly — a mount with oidc_client_id refuses
+# JWT logins) and auth/ldap (directory), with external identity groups — one
+# per (mount, directory group) — carrying the person policies. The policies
+# themselves are Terraform's (terraform/platform): this role only asserts
+# they exist. Ansible's own token (gt-ansible-platform), which can configure
+# auth methods and groups but can never write a policy. Every write is
+# preceded by a read so reruns report `ok`. These auth methods stay Ansible's
+# because their configuration carries secrets (client secret, bind password)
+# that must never enter Terraform state.
+
+- name: Find the active Vault node
+  ansible.builtin.include_role:
+    name: lab_common
+    tasks_from: active-addr
+
+- name: Address the active node and bind the CA
+  ansible.builtin.set_fact:
+    vault_identity_addr: "{{ hostvars['localhost'].lab_common_active_addr }}"
+    vault_identity_ca_pem: "{{ lookup('file', vault_ca_cert) }}"
+  no_log: true
+
+- name: Configure Vault identity
+  module_defaults:
+    ansible.builtin.uri:
+      ca_path: "{{ vault_ca_cert }}"
+      headers:
+        X-Vault-Token: "{{ lookup('file', tokens_dir ~ '/ansible-platform') | trim }}"
+  no_log: true
+  block:
+    # ── Policies: Terraform's — only prove they exist ─────────────────────────
+    - name: Read the person policies Terraform owns
+      ansible.builtin.uri:
+        url: "{{ vault_identity_addr }}/v1/sys/policies/acl/{{ item }}"
+        status_code: [200, 404]
+      check_mode: false
+      loop: "{{ identity_groups.values() | map(attribute='policy') | list }}"
+      register: vault_identity_policies
+
+    - name: Require every person policy (created by terraform/platform)
+      ansible.builtin.assert:
+        that: vault_identity_policies.results | selectattr('status', 'equalto', 404) | list | length == 0
+        fail_msg: >-
+          Missing policies {{ vault_identity_policies.results | selectattr('status', 'equalto', 404) | map(attribute='item') | list }}:
+          they are Terraform's — run 'make platform'.
+        quiet: true
+
+    # ── Auth methods ──────────────────────────────────────────────────────────
+    - name: Read enabled auth methods
+      ansible.builtin.uri:
+        url: "{{ vault_identity_addr }}/v1/sys/auth"
+      check_mode: false
+      register: vault_identity_auth
+
+    - name: Enable oidc, jwt and ldap auth
+      ansible.builtin.uri:
+        url: "{{ vault_identity_addr }}/v1/sys/auth/{{ item }}"
+        method: POST
+        body_format: json
+        body: { type: "{{ item }}", description: "golden_ticket people ({{ item }})" }
+        status_code: [200, 204]
+      changed_when: true
+      loop: [oidc, jwt, ldap]
+      when: (item ~ '/') not in vault_identity_auth.json.data
+
+    - name: Re-read auth methods for their accessors
+      ansible.builtin.uri:
+        url: "{{ vault_identity_addr }}/v1/sys/auth"
+      check_mode: false
+      register: vault_identity_auth
+
+    - name: Remember the mount accessors
+      ansible.builtin.set_fact:
+        vault_identity_accessor:
+          oidc: "{{ vault_identity_auth.json.data['oidc/'].accessor | default('') }}"
+          jwt: "{{ vault_identity_auth.json.data['jwt/'].accessor | default('') }}"
+          ldap: "{{ vault_identity_auth.json.data['ldap/'].accessor | default('') }}"
+
+    # ── OIDC (Keycloak) ───────────────────────────────────────────────────────
+    - name: Read the OIDC config
+      ansible.builtin.uri:
+        url: "{{ vault_identity_addr }}/v1/auth/oidc/config"
+        status_code: [200, 404]
+      check_mode: false
+      register: vault_identity_oidc_cfg
+
+    - name: Write the OIDC config when it differs
+      ansible.builtin.uri:
+        url: "{{ vault_identity_addr }}/v1/auth/oidc/config"
+        method: POST
+        body_format: json
+        body:
+          oidc_discovery_url: "{{ keycloak_issuer }}"
+          oidc_discovery_ca_pem: "{{ vault_identity_ca_pem }}"
+          oidc_client_id: vault
+          oidc_client_secret: "{{ hostvars['localhost'].identity_secrets_values.vault_client_secret }}"
+          default_role: default
+        status_code: [200, 204]
+      changed_when: true
+      when: >-
+        vault_identity_oidc_cfg.status == 404 or
+        vault_identity_oidc_cfg.json.data.oidc_discovery_url != keycloak_issuer or
+        vault_identity_oidc_cfg.json.data.oidc_client_id != 'vault' or
+        vault_identity_oidc_cfg.json.data.default_role != 'default' or
+        (vault_identity_oidc_cfg.json.data.oidc_discovery_ca_pem | trim) != (vault_identity_ca_pem | trim) or
+        vault_identity_force_oidc_secret | default(false) | bool
+
+    - name: Desired roles (mount/role)
+      ansible.builtin.set_fact:
+        vault_identity_roles:
+          oidc/default:
+            role_type: oidc
+            user_claim: preferred_username
+            groups_claim: groups
+            bound_audiences: [vault]
+            oidc_scopes: [openid, profile, email]
+            allowed_redirect_uris: "{{ vault_oidc_redirect_uris }}"
+            token_ttl: 3600
+            token_max_ttl: 14400
+          # Lab only: Keycloak id_tokens from gt-cli (gate tests).
+          jwt/cli:
+            role_type: jwt
+            user_claim: preferred_username
+            groups_claim: groups
+            bound_audiences: [gt-cli]
+            token_ttl: 900
+            token_max_ttl: 900
+
+    - name: Read the JWT config
+      ansible.builtin.uri:
+        url: "{{ vault_identity_addr }}/v1/auth/jwt/config"
+        status_code: [200, 404]
+      check_mode: false
+      register: vault_identity_jwt_cfg
+
+    - name: Write the JWT config (discovery only) when it differs
+      ansible.builtin.uri:
+        url: "{{ vault_identity_addr }}/v1/auth/jwt/config"
+        method: POST
+        body_format: json
+        body:
+          oidc_discovery_url: "{{ keycloak_issuer }}"
+          oidc_discovery_ca_pem: "{{ vault_identity_ca_pem }}"
+          bound_issuer: "{{ keycloak_issuer }}"
+          default_role: cli
+        status_code: [200, 204]
+      changed_when: true
+      when: >-
+        vault_identity_jwt_cfg.status == 404 or
+        vault_identity_jwt_cfg.json.data.oidc_discovery_url != keycloak_issuer or
+        vault_identity_jwt_cfg.json.data.bound_issuer != keycloak_issuer or
+        (vault_identity_jwt_cfg.json.data.oidc_discovery_ca_pem | trim) != (vault_identity_ca_pem | trim)
+
+    - name: Read the roles
+      ansible.builtin.uri:
+        url: "{{ vault_identity_addr }}/v1/auth/{{ item.split('/')[0] }}/role/{{ item.split('/')[1] }}"
+        status_code: [200, 404]
+      check_mode: false
+      loop: "{{ vault_identity_roles.keys() | list }}"
+      register: vault_identity_role_reads
+
+    - name: Write roles that differ
+      ansible.builtin.uri:
+        url: "{{ vault_identity_addr }}/v1/auth/{{ item.item.split('/')[0] }}/role/{{ item.item.split('/')[1] }}"
+        method: POST
+        body_format: json
+        body: "{{ vault_identity_roles[item.item] }}"
+        status_code: [200, 204]
+      changed_when: true
+      loop: "{{ vault_identity_role_reads.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: >-
+        item.status == 404 or
+        vault_identity_roles[item.item].user_claim != item.json.data.user_claim or
+        vault_identity_roles[item.item].groups_claim != item.json.data.groups_claim or
+        (vault_identity_roles[item.item].bound_audiences | sort) != (item.json.data.bound_audiences | default([], true) | sort) or
+        ((vault_identity_roles[item.item].allowed_redirect_uris | default([])) | sort) != ((item.json.data.allowed_redirect_uris | default([], true)) | sort) or
+        vault_identity_roles[item.item].role_type != item.json.data.role_type
+
+    # ── LDAP ──────────────────────────────────────────────────────────────────
+    - name: Read the LDAP config
+      ansible.builtin.uri:
+        url: "{{ vault_identity_addr }}/v1/auth/ldap/config"
+      check_mode: false
+      register: vault_identity_ldap_cfg
+
+    - name: Desired LDAP config
+      ansible.builtin.set_fact:
+        vault_identity_ldap:
+          url: "{{ ldaps_url }}"
+          certificate: "{{ vault_identity_ca_pem }}"
+          insecure_tls: false
+          starttls: false
+          binddn: "cn=readonly,{{ identity_base_dn }}"
+          userdn: "ou=people,{{ identity_base_dn }}"
+          userattr: uid
+          groupdn: "ou=groups,{{ identity_base_dn }}"
+          groupfilter: "(&(objectClass=groupOfNames)(member={{ '{{' }}.UserDN{{ '}}' }}))"
+          groupattr: cn
+          token_ttl: 3600
+          token_max_ttl: 14400
+
+    - name: Write the LDAP config when it differs
+      ansible.builtin.uri:
+        url: "{{ vault_identity_addr }}/v1/auth/ldap/config"
+        method: POST
+        body_format: json
+        body: "{{ vault_identity_ldap | combine({'bindpass': hostvars['localhost'].identity_secrets_values.ldap_readonly_password}) }}"
+        status_code: [200, 204]
+      changed_when: true
+      when: >-
+        vault_identity_ldap_cfg.json.data.url != vault_identity_ldap.url or
+        vault_identity_ldap_cfg.json.data.binddn != vault_identity_ldap.binddn or
+        vault_identity_ldap_cfg.json.data.userdn != vault_identity_ldap.userdn or
+        vault_identity_ldap_cfg.json.data.groupdn != vault_identity_ldap.groupdn or
+        vault_identity_ldap_cfg.json.data.groupfilter != vault_identity_ldap.groupfilter or
+        (vault_identity_ldap_cfg.json.data.certificate | default('') | trim) != (vault_identity_ca_pem | trim)
+
+    # ── External groups: one per (mount, directory group) ────────────────────
+    - name: Read the external groups
+      ansible.builtin.uri:
+        url: "{{ vault_identity_addr }}/v1/identity/group/name/{{ item.0 }}-{{ item.1.key }}"
+        status_code: [200, 404]
+      check_mode: false
+      loop: "{{ ['oidc', 'jwt', 'ldap'] | product(identity_groups | dict2items) | list }}"
+      loop_control:
+        label: "{{ item.0 }}-{{ item.1.key }}"
+      register: vault_identity_groups
+
+    - name: Create or correct external groups
+      ansible.builtin.uri:
+        url: "{{ vault_identity_addr }}/v1/identity/group/name/{{ item.item.0 }}-{{ item.item.1.key }}"
+        method: POST
+        body_format: json
+        body: { type: external, policies: ["{{ item.item.1.value.policy }}"], metadata: { source: golden_ticket } }
+        status_code: [200, 204]
+      changed_when: true
+      loop: "{{ vault_identity_groups.results }}"
+      loop_control:
+        label: "{{ item.item.0 }}-{{ item.item.1.key }}"
+      when: item.status == 404 or item.json.data.policies != [item.item.1.value.policy]
+
+    - name: Re-read the external groups for their ids and aliases
+      ansible.builtin.uri:
+        url: "{{ vault_identity_addr }}/v1/identity/group/name/{{ item.0 }}-{{ item.1.key }}"
+      check_mode: false
+      loop: "{{ ['oidc', 'jwt', 'ldap'] | product(identity_groups | dict2items) | list }}"
+      loop_control:
+        label: "{{ item.0 }}-{{ item.1.key }}"
+      register: vault_identity_groups
+
+    - name: Alias each external group to its directory group
+      ansible.builtin.uri:
+        url: "{{ vault_identity_addr }}/v1/identity/group-alias"
+        method: POST
+        body_format: json
+        body:
+          name: "{{ item.item.1.key }}"
+          mount_accessor: "{{ vault_identity_accessor[item.item.0] }}"
+          canonical_id: "{{ item.json.data.id }}"
+        status_code: [200, 204]
+      changed_when: true
+      loop: "{{ vault_identity_groups.results }}"
+      loop_control:
+        label: "{{ item.item.0 }}-{{ item.item.1.key }}"
+      when: (item.json.data.alias | default({}, true)).name | default('') != item.item.1.key

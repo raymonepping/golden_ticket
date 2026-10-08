@@ -1,0 +1,59 @@
+---
+# Identity secrets live in Vault KV v2 (root namespace) at
+# secret/golden-ticket/identity. The mount is Terraform's (terraform/platform);
+# the values are generated once by Ansible and read back on every run, with
+# Ansible's own token. Exposes `identity_secrets` (dict) on localhost; every
+# task is no_log.
+
+- name: Find the active Vault node
+  ansible.builtin.include_role:
+    name: lab_common
+    tasks_from: active-addr
+
+- name: Address the active node
+  ansible.builtin.set_fact:
+    identity_secrets_addr: "{{ hostvars['localhost'].lab_common_active_addr }}"
+
+- name: Manage the identity secrets
+  module_defaults:
+    ansible.builtin.uri:
+      ca_path: "{{ vault_ca_cert }}"
+      headers:
+        X-Vault-Token: "{{ lookup('file', tokens_dir ~ '/ansible-platform') | trim }}"
+  no_log: true
+  block:
+    - name: Read the identity secrets
+      ansible.builtin.uri:
+        url: "{{ identity_secrets_addr }}/v1/{{ identity_kv_mount }}/data/{{ identity_kv_path }}"
+        status_code: [200, 404]
+      check_mode: false
+      register: identity_secrets_read
+      retries: 5
+      delay: 2
+      until: identity_secrets_read.status in [200, 404]
+
+    - name: Work out which secrets are missing
+      ansible.builtin.set_fact:
+        identity_secrets_current: "{{ identity_secrets_read.json.data.data if identity_secrets_read.status == 200 else {} }}"
+        identity_secrets_wanted: "{{ identity_secret_keys + (identity_users | map(attribute='uid') | map('regex_replace', '^', 'user_') | list) }}"
+
+    - name: Generate the missing secrets
+      ansible.builtin.set_fact:
+        identity_secrets_generated: >-
+          {{ identity_secrets_generated | default({})
+             | combine({item: lookup('ansible.builtin.password', '/dev/null', length=32, chars=['ascii_letters', 'digits'])}) }}
+      loop: "{{ identity_secrets_wanted | difference(identity_secrets_current.keys() | list) }}"
+
+    - name: Store the completed secret set
+      ansible.builtin.uri:
+        url: "{{ identity_secrets_addr }}/v1/{{ identity_kv_mount }}/data/{{ identity_kv_path }}"
+        method: POST
+        body_format: json
+        body: { data: "{{ identity_secrets_current | combine(identity_secrets_generated) }}" }
+        status_code: [200, 204]
+      changed_when: true
+      when: identity_secrets_generated | default({}) | length > 0
+
+    - name: Expose the identity secrets to later plays
+      ansible.builtin.set_fact:
+        identity_secrets_values: "{{ identity_secrets_current | combine(identity_secrets_generated | default({})) }}"

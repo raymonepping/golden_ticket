@@ -128,3 +128,15 @@ proxy: ## Ansible: HAProxy front door on gt-proxy-1
 
 proxy-failover-test: ## Stop Vault on the active node; the front door must follow the new leader (changes state)
 	$(RUN) proxy-failover-test
+
+# ── People (prompt 07) ───────────────────────────────────────────────────────
+.PHONY: identity identity-verify identity-show-user
+
+identity: ## Ansible: OpenLDAP + Keycloak on gt-identity-1, Vault oidc/jwt/ldap + groups (policies are Terraform's)
+	$(RUN) identity
+
+identity-verify: ## Every person logs in (Keycloak, Vault JWT + LDAP) and gets exactly their policy
+	$(RUN) identity-verify
+
+identity-show-user: ## Print one lab login password (PERSON=raymon) — lab only, explicit action
+	@./scripts/identity-show-user.sh "$(PERSON)"

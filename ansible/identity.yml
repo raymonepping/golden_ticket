@@ -1,0 +1,45 @@
+---
+# identity.yml — people for the lab:
+#   1. identity secrets in Vault KV (generated once; the secret/ mount is
+#      Terraform's)
+#   2. OpenLDAP + Keycloak on gt-identity-1 (Podman Quadlet, host networking)
+#   3. Vault auth/oidc + auth/jwt + auth/ldap + external groups carrying the
+#      policies Terraform created
+#
+#   make identity
+
+- name: Inventory
+  ansible.builtin.import_playbook: preamble.yml
+
+- name: Identity secrets (Vault KV, Ansible's token)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  roles:
+    - identity_secrets
+
+- name: OpenLDAP and Keycloak
+  hosts: identity
+  become: true
+  gather_facts: false
+  roles:
+    - identity_stack
+
+- name: Vault trusts people
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  roles:
+    - vault_identity
+  post_tasks:
+    - name: Ensure the deployment-marker directory exists
+      ansible.builtin.file:
+        path: "{{ deployed_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Mark identity as deployed (non-secret; turns on its validation rows)
+      ansible.builtin.copy:
+        content: "{{ {'service': 'identity', 'node': identity_node, 'issuer': keycloak_issuer} | to_nice_json }}\n"
+        dest: "{{ deployed_dir }}/identity.json"
+        mode: "0644"

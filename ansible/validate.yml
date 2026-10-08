@@ -345,6 +345,17 @@
                'role': hostvars[item].gt_role, 'checks': hostvars[item].val_node_checks | default([])}}) }}
       loop: "{{ groups['agent'] + groups['proxy'] + groups['identity'] + groups['ux'] }}"
 
+    - name: Identity checks (once identity is deployed)
+      when: (deployed_dir ~ '/identity.json') is file
+      block:
+        - name: Read the identity secrets
+          ansible.builtin.include_role:
+            name: identity_secrets
+
+        - name: Exercise every person
+          ansible.builtin.include_role:
+            name: identity_verify
+
     - name: Front-door checks
       block:
         - name: Which services are deployed (markers from identity.yml / ux.yml)
@@ -496,7 +507,7 @@
                            else (val_declared.policies.value | length) ~ ' policies, '
                                 ~ (val_declared.token_roles.value | length) ~ ' token role(s)'}] }}
           boundary: "{{ val_boundary_rows }}"
-          identity: []
+          identity: "{{ identity_verify_report | default([]) }}"
           front_door: "{{ val_front_door }}"
           seal_chain: >-
             {{ [{'id': 'seal_key', 'label': 'Transit key autounseal present',

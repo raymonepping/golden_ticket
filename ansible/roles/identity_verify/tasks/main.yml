@@ -1,0 +1,154 @@
+---
+# Prove people work end to end. Produces `identity_verify_report` (list of
+# {id,label,status,detail}) for validate.yml. Tokens are revoked at the end.
+# Runs on localhost; needs identity_secrets_values (identity_secrets role).
+
+- name: Find the active Vault node
+  ansible.builtin.include_role:
+    name: lab_common
+    tasks_from: active-addr
+
+- name: Address Keycloak and Vault
+  ansible.builtin.set_fact:
+    identity_verify_vault: "{{ hostvars['localhost'].lab_common_active_addr }}"
+    identity_verify_token_url: "{{ keycloak_issuer }}/protocol/openid-connect/token"
+    identity_verify_report: []
+
+- name: Exercise every person
+  no_log: true
+  block:
+    - name: Keycloak password grant (gt-cli) per person
+      ansible.builtin.uri:
+        url: "{{ identity_verify_token_url }}"
+        method: POST
+        ca_path: "{{ vault_ca_cert }}"
+        body_format: form-urlencoded
+        body:
+          grant_type: password
+          client_id: gt-cli
+          scope: openid
+          username: "{{ item.uid }}"
+          password: "{{ identity_secrets_values['user_' ~ item.uid] }}"
+        status_code: [200, 400, 401]
+      check_mode: false
+      loop: "{{ identity_users }}"
+      register: identity_verify_kc
+
+    - name: Vault JWT login with each Keycloak id_token
+      ansible.builtin.uri:
+        url: "{{ identity_verify_vault }}/v1/auth/jwt/login"
+        method: POST
+        ca_path: "{{ vault_ca_cert }}"
+        body_format: json
+        body: { role: cli, jwt: "{{ item.json.id_token | default('') }}" }
+        status_code: [200, 400, 403]
+      check_mode: false
+      loop: "{{ identity_verify_kc.results }}"
+      register: identity_verify_oidc
+
+    - name: Vault LDAP login per person
+      ansible.builtin.uri:
+        url: "{{ identity_verify_vault }}/v1/auth/ldap/login/{{ item.uid }}"
+        method: POST
+        ca_path: "{{ vault_ca_cert }}"
+        body_format: json
+        body: { password: "{{ identity_secrets_values['user_' ~ item.uid] }}" }
+        status_code: [200, 400, 403]
+      check_mode: false
+      loop: "{{ identity_users }}"
+      register: identity_verify_ldap
+
+    - name: Index tokens by person (memory only)
+      ansible.builtin.set_fact:
+        identity_verify_tok: >-
+          {{ identity_verify_tok | default({}) | combine({item.0.uid: {
+               'oidc': item.1.json.auth.client_token | default(''),
+               'ldap': item.2.json.auth.client_token | default('') }}) }}
+      loop: "{{ identity_users | zip(identity_verify_oidc.results, identity_verify_ldap.results) | list }}"
+
+    # Effective identity policies are authoritative on the token itself (the
+    # JWT login response leaves identity_policies empty).
+    - name: Look up every person's tokens
+      ansible.builtin.uri:
+        url: "{{ identity_verify_vault }}/v1/auth/token/lookup-self"
+        ca_path: "{{ vault_ca_cert }}"
+        headers: { X-Vault-Token: "{{ identity_verify_tok[item.0.uid][item.1] }}" }
+        status_code: [200, 400, 403]
+      check_mode: false
+      loop: "{{ identity_users | product(['oidc', 'ldap']) | list }}"
+      register: identity_verify_lookup
+
+    - name: Index effective identity policies (names only)
+      ansible.builtin.set_fact:
+        identity_verify_policies: >-
+          {{ identity_verify_policies | default({}) | combine({item.item.0.uid ~ '/' ~ item.item.1:
+               (item.json.data.identity_policies | default([], true)) if item.status == 200 else []}) }}
+      loop: "{{ identity_verify_lookup.results }}"
+
+    - name: Operator encrypts with Transit
+      ansible.builtin.uri:
+        url: "{{ identity_verify_vault }}/v1/transit/encrypt/{{ identity_demo_transit_key }}"
+        method: POST
+        ca_path: "{{ vault_ca_cert }}"
+        headers: { X-Vault-Token: "{{ identity_verify_tok[identity_verify_operator].oidc }}", X-Vault-Namespace: engineering }
+        body_format: json
+        body: { plaintext: "{{ 'golden_ticket identity check' | b64encode }}" }
+        status_code: [200, 403]
+      check_mode: false
+      register: identity_verify_encrypt
+      vars:
+        identity_verify_operator: "{{ (identity_users | selectattr('group', 'equalto', 'gt-operators') | first).uid }}"
+
+    - name: Viewer tries to write KV (must be denied)
+      ansible.builtin.uri:
+        url: "{{ identity_verify_vault }}/v1/kv/data/gt-identity-check"
+        method: POST
+        ca_path: "{{ vault_ca_cert }}"
+        headers: { X-Vault-Token: "{{ identity_verify_tok[identity_verify_viewer].oidc }}", X-Vault-Namespace: engineering }
+        body_format: json
+        body: { data: { probe: denied } }
+        status_code: [200, 204, 403]
+      check_mode: false
+      register: identity_verify_viewer_write
+      vars:
+        identity_verify_viewer: "{{ (identity_users | selectattr('group', 'equalto', 'gt-viewers') | first).uid }}"
+
+    - name: Revoke every token issued for the checks
+      ansible.builtin.uri:
+        url: "{{ identity_verify_vault }}/v1/auth/token/revoke-self"
+        method: POST
+        ca_path: "{{ vault_ca_cert }}"
+        headers: { X-Vault-Token: "{{ item }}" }
+        status_code: [200, 204, 403]
+      check_mode: false
+      changed_when: false
+      loop: "{{ identity_verify_tok.values() | map('dict2items') | flatten | map(attribute='value') | select | list }}"
+
+    - name: Build the identity report (no tokens, no passwords)
+      ansible.builtin.set_fact:
+        identity_verify_report: >-
+          {{ identity_verify_report + [
+               {'id': 'kc-' ~ u.uid, 'label': 'Keycloak login · ' ~ u.uid,
+                'status': 'pass' if kc.status == 200 and (kc.json.id_token | default('')) | length > 0 else 'fail',
+                'detail': 'id_token issued by ' ~ keycloak_issuer if kc.status == 200 else 'HTTP ' ~ kc.status},
+               {'id': 'jwt-' ~ u.uid, 'label': 'Vault JWT login (Keycloak token) · ' ~ u.uid,
+                'status': 'pass' if oi.status == 200 and identity_verify_policies[u.uid ~ '/oidc'] == [identity_groups[u.group].policy] else 'fail',
+                'detail': ('identity policies ' ~ (identity_verify_policies[u.uid ~ '/oidc'] | join(','))) if oi.status == 200 else 'HTTP ' ~ oi.status},
+               {'id': 'ldap-' ~ u.uid, 'label': 'Vault LDAP login · ' ~ u.uid,
+                'status': 'pass' if ld.status == 200 and identity_verify_policies[u.uid ~ '/ldap'] == [identity_groups[u.group].policy] else 'fail',
+                'detail': ('identity policies ' ~ (identity_verify_policies[u.uid ~ '/ldap'] | join(','))) if ld.status == 200 else 'HTTP ' ~ ld.status}] }}
+      loop: "{{ identity_users | zip(identity_verify_kc.results, identity_verify_oidc.results, identity_verify_ldap.results) | list }}"
+      vars:
+        u: "{{ item.0 }}"
+        kc: "{{ item.1 }}"
+        oi: "{{ item.2 }}"
+        ld: "{{ item.3 }}"
+
+- name: Add the authorisation checks
+  ansible.builtin.set_fact:
+    identity_verify_report: >-
+      {{ identity_verify_report + [
+           {'id': 'operator-encrypt', 'label': 'Operator can encrypt (engineering Transit, key from Terraform)',
+            'status': 'pass' if identity_verify_encrypt.status == 200 else 'fail', 'detail': 'HTTP ' ~ identity_verify_encrypt.status},
+           {'id': 'viewer-denied', 'label': 'Viewer is denied a KV write',
+            'status': 'pass' if identity_verify_viewer_write.status == 403 else 'fail', 'detail': 'HTTP ' ~ identity_verify_viewer_write.status}] }}

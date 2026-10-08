@@ -1,0 +1,164 @@
+---
+# Realm golden-ticket federating the directory read-only; LDAP groups become
+# Keycloak groups and reach every client as the `groups` claim.
+
+
+- name: Ensure the realm
+  community.general.keycloak_realm:
+    auth_keycloak_url: "{{ keycloak_public_url }}"
+    auth_realm: master
+    auth_username: admin
+    auth_password: "{{ identity_stack_secrets.keycloak_admin_password }}"
+    id: "{{ identity_realm }}"
+    realm: "{{ identity_realm }}"
+    display_name: golden_ticket
+    enabled: true
+    ssl_required: external
+    state: present
+  no_log: true
+
+- name: Federate the directory (read-only) with a group mapper
+  community.general.keycloak_user_federation:
+    auth_keycloak_url: "{{ keycloak_public_url }}"
+    auth_realm: master
+    auth_username: admin
+    auth_password: "{{ identity_stack_secrets.keycloak_admin_password }}"
+    realm: "{{ identity_realm }}"
+    name: golden-ticket-ldap
+    provider_id: ldap
+    state: present
+    config:
+      enabled: true
+      priority: 0
+      vendor: other
+      editMode: READ_ONLY
+      connectionUrl: ldap://127.0.0.1:389
+      bindDn: "cn=readonly,{{ identity_base_dn }}"
+      bindCredential: "{{ identity_stack_secrets.ldap_readonly_password }}"
+      usersDn: "ou=people,{{ identity_base_dn }}"
+      usernameLDAPAttribute: uid
+      rdnLDAPAttribute: uid
+      uuidLDAPAttribute: entryUUID
+      userObjectClasses: inetOrgPerson, organizationalPerson
+      searchScope: 1
+      authType: simple
+      importEnabled: true
+      syncRegistrations: false
+      trustEmail: true
+      pagination: false
+    # Listing mappers replaces Keycloak's defaults, so the attribute mappers
+    # (username above all) are declared here too.
+    mappers:
+      - name: username
+        providerId: user-attribute-ldap-mapper
+        providerType: org.keycloak.storage.ldap.mappers.LDAPStorageMapper
+        config:
+          ldap.attribute: uid
+          user.model.attribute: username
+          read.only: "true"
+          always.read.value.from.ldap: "false"
+          is.mandatory.in.ldap: "true"
+      - name: email
+        providerId: user-attribute-ldap-mapper
+        providerType: org.keycloak.storage.ldap.mappers.LDAPStorageMapper
+        config:
+          ldap.attribute: mail
+          user.model.attribute: email
+          read.only: "true"
+          always.read.value.from.ldap: "false"
+          is.mandatory.in.ldap: "false"
+      - name: first name
+        providerId: user-attribute-ldap-mapper
+        providerType: org.keycloak.storage.ldap.mappers.LDAPStorageMapper
+        config:
+          ldap.attribute: cn
+          user.model.attribute: firstName
+          read.only: "true"
+          always.read.value.from.ldap: "true"
+          is.mandatory.in.ldap: "true"
+      - name: last name
+        providerId: user-attribute-ldap-mapper
+        providerType: org.keycloak.storage.ldap.mappers.LDAPStorageMapper
+        config:
+          ldap.attribute: sn
+          user.model.attribute: lastName
+          read.only: "true"
+          always.read.value.from.ldap: "true"
+          is.mandatory.in.ldap: "true"
+      - name: groups
+        providerId: group-ldap-mapper
+        providerType: org.keycloak.storage.ldap.mappers.LDAPStorageMapper
+        config:
+          groups.dn: "ou=groups,{{ identity_base_dn }}"
+          group.name.ldap.attribute: cn
+          group.object.classes: groupOfNames
+          membership.ldap.attribute: member
+          membership.attribute.type: DN
+          membership.user.ldap.attribute: uid
+          mode: READ_ONLY
+          user.roles.retrieve.strategy: LOAD_GROUPS_BY_MEMBER_ATTRIBUTE
+          preserve.group.inheritance: "false"
+          ignore.missing.groups: "false"
+          drop.non.existing.groups.during.sync: "false"
+  no_log: true
+
+- name: Ensure the OIDC clients
+  community.general.keycloak_client:
+    auth_keycloak_url: "{{ keycloak_public_url }}"
+    auth_realm: master
+    auth_username: admin
+    auth_password: "{{ identity_stack_secrets.keycloak_admin_password }}"
+    realm: "{{ identity_realm }}"
+    client_id: "{{ item.client_id }}"
+    name: "{{ item.client_id }}"
+    enabled: true
+    protocol: openid-connect
+    public_client: "{{ item.public }}"
+    secret: "{{ item.secret | default(omit) }}"
+    client_authenticator_type: client-secret
+    standard_flow_enabled: "{{ item.standard }}"
+    direct_access_grants_enabled: "{{ item.direct }}"
+    implicit_flow_enabled: false
+    service_accounts_enabled: false
+    redirect_uris: "{{ item.redirects }}"
+    web_origins: "{{ item.origins | default([]) }}"
+    attributes: "{{ item.attributes | default({}) }}"
+    protocol_mappers:
+      - name: groups
+        protocol: openid-connect
+        protocolMapper: oidc-group-membership-mapper
+        config:
+          claim.name: groups
+          full.path: "false"
+          id.token.claim: "true"
+          access.token.claim: "true"
+          userinfo.token.claim: "true"
+          # Keycloak stores this explicitly; declaring it keeps reruns ok.
+          multivalued: "true"
+    state: present
+  loop:
+    - client_id: vault
+      public: false
+      secret: "{{ identity_stack_secrets.vault_client_secret }}"
+      standard: true
+      direct: false
+      redirects: "{{ vault_oidc_redirect_uris }}"
+    - client_id: gt-ui
+      public: false
+      secret: "{{ identity_stack_secrets.ui_client_secret }}"
+      standard: true
+      direct: false
+      redirects: "{{ (ux_public_origins + [ux_host_origin]) | map('regex_replace', '$', '/auth/callback') | list }}"
+      origins: "{{ ux_public_origins + [ux_host_origin] }}"
+      attributes:
+        pkce.code.challenge.method: S256
+        post.logout.redirect.uris: "{{ (ux_public_origins + [ux_host_origin]) | map('regex_replace', '$', '/signin') | join('##') }}"
+    # Lab only: password grant for the gate tests (identity-verify).
+    - client_id: gt-cli
+      public: true
+      standard: false
+      direct: true
+      redirects: []
+  loop_control:
+    label: "{{ item.client_id }}"
+  no_log: true

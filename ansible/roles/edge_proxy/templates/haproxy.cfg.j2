@@ -99,7 +99,9 @@ frontend keycloak
     default_backend keycloak
 
 backend keycloak
-    option httpchk GET /realms/{{ identity_realm }}/.well-known/openid-configuration
+    # The master realm always exists; the lab realm only after identity.yml
+    # creates it — through this very front door (the proxy comes first here).
+    option httpchk GET /realms/master/.well-known/openid-configuration
     http-check expect status 200
 {% for n in groups['identity'] | sort %}
     server {{ n }} {{ hostvars[n].ansible_host }}:{{ keycloak_port }} sni str({{ n }}) verifyhost {{ n }}

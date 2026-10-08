@@ -1,0 +1,183 @@
+---
+# OpenLDAP + Keycloak on gt-identity-1 as system Podman containers managed by
+# systemd Quadlet. Secrets come from Vault KV (identity_secrets_values on localhost)
+# and reach the containers only as Podman secrets.
+
+- name: Bind the identity secrets from the controller (in memory)
+  ansible.builtin.set_fact:
+    identity_stack_secrets: "{{ hostvars['localhost'].identity_secrets_values }}"
+  no_log: true
+
+- name: Install Podman and the LDAP client libraries
+  ansible.builtin.dnf:
+    name: [podman, python3-ldap, openldap-clients]
+    state: present
+
+- name: Create the configuration directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner | default('root') }}"
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ identity_conf_dir }}", mode: "0755" }
+    - { path: "{{ identity_conf_dir }}/tls", mode: "0755" }
+    - { path: "{{ identity_conf_dir }}/tls/keycloak", mode: "0755" }
+    - { path: "{{ identity_conf_dir }}/tls/ldap", mode: "0755" }
+    - { path: /etc/containers/systemd, mode: "0755" }
+
+# ── TLS from the lab CA ──────────────────────────────────────────────────────
+- name: Issue the identity certificate
+  ansible.builtin.include_role:
+    name: vault_tls
+    tasks_from: issue.yml
+
+- name: Trust the lab CA on the node
+  ansible.builtin.include_role:
+    name: vault_tls
+    tasks_from: anchor.yml
+
+- name: Install the public certificates
+  ansible.builtin.copy:
+    src: "{{ tls_dir }}/{{ item.src }}"
+    dest: "{{ identity_conf_dir }}/tls/{{ item.dest }}"
+    mode: "0644"
+  loop:
+    - { src: "{{ inventory_hostname }}.crt", dest: keycloak/server.crt, notify: keycloak }
+    - { src: "{{ inventory_hostname }}.crt", dest: ldap/server.crt, notify: openldap }
+    - { src: ca.crt, dest: ldap/ca.crt, notify: openldap }
+  loop_control:
+    label: "{{ item.dest }}"
+  register: identity_stack_certs
+
+# Keycloak runs as uid 1000 in the container (rootful Podman, no userns).
+- name: Install the Keycloak private key (contents suppressed)
+  ansible.builtin.copy:
+    src: "{{ tls_dir }}/{{ inventory_hostname }}.key"
+    dest: "{{ identity_conf_dir }}/tls/keycloak/server.key"
+    owner: "1000"
+    mode: "0400"
+  no_log: true
+  diff: false
+  register: identity_stack_kc_key
+
+- name: Install the OpenLDAP private key (contents suppressed)
+  ansible.builtin.copy:
+    src: "{{ tls_dir }}/{{ inventory_hostname }}.key"
+    dest: "{{ identity_conf_dir }}/tls/ldap/server.key"
+    mode: "0600"
+  no_log: true
+  diff: false
+  register: identity_stack_ldap_key
+
+# ── Podman secrets ───────────────────────────────────────────────────────────
+- name: Create the Podman secrets (contents suppressed)
+  containers.podman.podman_secret:
+    name: "{{ item.name }}"
+    data: "{{ identity_stack_secrets[item.key] }}"
+    state: present
+    force: false
+    skip_existing: true
+  loop:
+    - { name: ldap-admin-password, key: ldap_admin_password }
+    - { name: ldap-readonly-password, key: ldap_readonly_password }
+    - { name: keycloak-admin-password, key: keycloak_admin_password }
+  loop_control:
+    label: "{{ item.name }}"
+  no_log: true
+
+# ── Quadlet units ────────────────────────────────────────────────────────────
+- name: Install the Quadlet containers
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/containers/systemd/{{ item }}"
+    mode: "0644"
+  loop: [openldap.container, keycloak.container]
+  register: identity_stack_units
+
+- name: Regenerate units after Quadlet changes
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  # Immediately, not as a handler: the restarts below need the regenerated units.
+  when: identity_stack_units is changed # noqa: no-handler
+
+- name: Restart OpenLDAP when its unit or TLS changed
+  ansible.builtin.systemd_service:
+    name: openldap
+    state: restarted
+  when: >-
+    (identity_stack_units.results | selectattr('item', 'equalto', 'openldap.container') | first) is changed
+    or identity_stack_ldap_key is changed
+    or (identity_stack_certs.results | selectattr('item.notify', 'equalto', 'openldap') | selectattr('changed') | list | length > 0)
+
+- name: Restart Keycloak when its unit or TLS changed
+  ansible.builtin.systemd_service:
+    name: keycloak
+    state: restarted
+  when: >-
+    (identity_stack_units.results | selectattr('item', 'equalto', 'keycloak.container') | first) is changed
+    or identity_stack_kc_key is changed
+    or (identity_stack_certs.results | selectattr('item.notify', 'equalto', 'keycloak') | selectattr('changed') | list | length > 0)
+
+- name: Start the identity services
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    state: started
+  loop: [openldap, keycloak]
+
+# LDAPS only for the Vault cluster; Keycloak only for the front door
+# (everyone reaches Keycloak through the proxy). Management 9000 never opens.
+- name: Open LDAPS to the Vault cluster
+  ansible.builtin.include_role:
+    name: lab_common
+    tasks_from: firewall-port
+  vars:
+    lab_common_fw_port: "{{ ldaps_port }}"
+    lab_common_fw_sources: "{{ groups['vault'] | map('extract', hostvars, 'ansible_host') | list }}"
+
+- name: Open Keycloak HTTPS to the front door only
+  ansible.builtin.include_role:
+    name: lab_common
+    tasks_from: firewall-port
+  vars:
+    lab_common_fw_port: "{{ keycloak_port }}"
+    lab_common_fw_sources: ["{{ hostvars[proxy_node].ansible_host }}"]
+
+# Anonymous reads of the base are denied by ACL (answered as "No such
+# object"); the root DSE is public and lists the naming context.
+- name: Wait for the directory
+  ansible.builtin.command:
+    argv: [ldapsearch, -x, -LLL, -H, "ldap://127.0.0.1:389", -b, "", -s, base, namingContexts]
+  register: identity_stack_ldap_up
+  changed_when: false
+  check_mode: false
+  retries: 30
+  delay: 3
+  until: identity_stack_ldap_up.rc == 0 and identity_base_dn in identity_stack_ldap_up.stdout
+
+- name: Wait for Keycloak to be ready
+  ansible.builtin.uri:
+    url: "https://127.0.0.1:{{ keycloak_mgmt_port }}/health/ready"
+  register: identity_stack_kc_ready
+  check_mode: false
+  retries: 60
+  delay: 5
+  until: identity_stack_kc_ready.status == 200
+
+# Keycloak is configured through its public URL (the front door); wait until
+# that path serves the realm-independent discovery.
+- name: Wait for Keycloak at its public URL
+  ansible.builtin.uri:
+    url: "{{ keycloak_public_url }}/realms/master/.well-known/openid-configuration"
+  register: identity_stack_kc_public
+  check_mode: false
+  retries: 30
+  delay: 3
+  until: identity_stack_kc_public.status == 200
+
+- name: Load the directory content
+  ansible.builtin.include_tasks: directory.yml
+
+- name: Configure the Keycloak realm
+  ansible.builtin.include_tasks: keycloak.yml

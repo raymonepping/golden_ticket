@@ -1,0 +1,37 @@
+# {{ ansible_managed }}
+[Unit]
+Description=golden_ticket OpenLDAP directory ({{ identity_base_dn }})
+
+[Container]
+Image={{ openldap_image }}
+ContainerName=openldap
+# Host networking: published ports are DNAT'd by netavark and bypass
+# firewalld, so the containers share the host's network and firewalld is the
+# real gate (636 only from the Vault cluster; 389 not opened at all).
+Network=host
+Volume=gt-ldap-data:/var/lib/ldap:Z
+Volume=gt-ldap-config:/etc/ldap/slapd.d:Z
+Volume={{ identity_conf_dir }}/tls/ldap:/container/service/slapd/assets/certs:Z
+Environment=LDAP_ORGANISATION=golden_ticket
+Environment=LDAP_DOMAIN={{ identity_domain }}
+Environment=LDAP_BASE_DN={{ identity_base_dn }}
+Environment=LDAP_ADMIN_PASSWORD_FILE=/run/secrets/ldap-admin-password
+Environment=LDAP_CONFIG_PASSWORD_FILE=/run/secrets/ldap-admin-password
+Environment=LDAP_READONLY_USER=true
+Environment=LDAP_READONLY_USER_USERNAME=readonly
+Environment=LDAP_READONLY_USER_PASSWORD_FILE=/run/secrets/ldap-readonly-password
+Environment=LDAP_TLS=true
+Environment=LDAP_TLS_CRT_FILENAME=server.crt
+Environment=LDAP_TLS_KEY_FILENAME=server.key
+Environment=LDAP_TLS_CA_CRT_FILENAME=ca.crt
+Environment=LDAP_TLS_VERIFY_CLIENT=never
+Environment=LDAP_TLS_ENFORCE=false
+Secret=ldap-admin-password
+Secret=ldap-readonly-password
+
+[Service]
+Restart=on-failure
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

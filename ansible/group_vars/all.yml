@@ -147,3 +147,41 @@ keycloak_issuer: "{{ keycloak_public_url }}/realms/{{ identity_realm }}"
 # Written by identity.yml / ux.yml once their service is deployed; until
 # then the matching front-door rows are "skipped", never "pass".
 deployed_dir: "{{ build_dir }}/deployed"
+
+# ── People: OpenLDAP + Keycloak on gt-identity-1 (prompt 07) ─────────────────
+# Keycloak is decoration, so Ansible configures it. The policies these groups
+# carry (gt-admin/operator/viewer) are Terraform's (terraform/platform).
+identity_domain: golden-ticket.lab
+identity_base_dn: dc=golden-ticket,dc=lab
+identity_conf_dir: /etc/gt-identity
+# Pinned multi-arch index digests (native linux/arm64; same pins as red_pass).
+keycloak_image: docker.io/keycloak/keycloak:26.6.4@sha256:0aae0de7fca85525f727d3354df17896092de8bb26ae4c12d89c77e5df8cbce4
+openldap_image: docker.io/osixia/openldap:1.5.0@sha256:18742e9c449c9c1afe129d3f2f3ee15fb34cc43e5f940a20f3399728f41d7c28
+ldaps_port: 636
+ldaps_url: "ldaps://{{ hostvars[identity_node].ansible_host | default(identity_node) }}:{{ ldaps_port }}"
+identity_groups:
+  gt-admins: { policy: gt-admin, ui_role: admin }
+  gt-operators: { policy: gt-operator, ui_role: operator }
+  gt-viewers: { policy: gt-viewer, ui_role: viewer }
+identity_users:
+  - { uid: raymon, cn: Raymon, sn: Epping, group: gt-admins }
+  - { uid: barend, cn: Barend, sn: Demo, group: gt-operators }
+  - { uid: viewer, cn: Viewer, sn: Demo, group: gt-viewers }
+# Vault KV v2 (mount secret/, Terraform's) holding every identity secret.
+identity_kv_path: golden-ticket/identity
+identity_secret_keys: [ldap_admin_password, ldap_readonly_password, keycloak_admin_password, vault_client_secret, ui_client_secret, ui_session_password]
+# The operator's Transit check uses the key Terraform declared
+# (terraform/platform var.transit_keys).
+identity_demo_transit_key: gt-demo
+# Browser origins of the console (Keycloak redirect URIs, allowed Origins):
+# the front door first, the console VM directly second.
+ux_public_origins:
+  - "{{ front_door_url }}"
+  - "https://{{ hostvars[ux_node].ansible_host | default(ux_node) }}:{{ ux_port }}"
+ux_host_origin: "http://127.0.0.1:3310"
+# Vault OIDC callbacks: the front door, every cluster node, the CLI listener.
+vault_oidc_redirect_uris: >-
+  {{ [front_door_url ~ ':' ~ proxy_ports.vault ~ '/ui/vault/auth/oidc/oidc/callback']
+     + (groups['vault'] | default([]) | map('extract', hostvars, 'ansible_host')
+        | map('regex_replace', '^(.*)$', 'https://\1:8200/ui/vault/auth/oidc/oidc/callback') | list)
+     + ['http://localhost:8250/oidc/callback'] }}

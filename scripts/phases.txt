@@ -9,4 +9,5 @@ ansible agent
 ansible bootstrap
 tf platform
 ansible proxy
+ansible identity
 ansible validate
