@@ -1,0 +1,24 @@
+# {{ ansible_managed }}
+[Unit]
+Description=golden_ticket seal agent (Vault Agent, AppRole {{ seal_approle }})
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+User={{ agent_user }}
+Group={{ agent_user }}
+RuntimeDirectory=vault-agent
+ExecStart={{ vault_bin }} agent -config={{ agent_conf_dir }}/agent.hcl
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadOnlyPaths={{ agent_conf_dir }}
+ReadWritePaths={{ agent_state_dir }}
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

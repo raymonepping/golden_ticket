@@ -1,0 +1,35 @@
+#!/bin/bash
+# {{ ansible_managed }}
+# Rotate the seal agent's AppRole secret-id with the narrowly scoped rotator
+# identity: mint a new one, swap the file atomically, destroy the old ones.
+# The agent's current token is unaffected; the new secret-id is used at its
+# next login. Never prints secrets.
+set -euo pipefail
+umask 077
+VAULT="https://{{ hostvars[lab_seal_node].ansible_host }}:{{ vault_api_port }}"
+CA="{{ agent_conf_dir }}/tls/ca.crt"
+DIR="{{ agent_conf_dir }}/approle"
+STATE="{{ agent_state_dir }}"
+ROLE="{{ seal_approle }}"
+
+api() { curl -fsS --cacert "$CA" "$@"; }
+
+login="$(jq -n --rawfile r "$DIR/rotator-role-id" --rawfile s "$DIR/rotator-secret-id" \
+  '{role_id: ($r | rtrimstr("\n")), secret_id: ($s | rtrimstr("\n"))}')"
+token="$(api -X POST --data @- "$VAULT/v1/auth/approle/login" <<<"$login" | jq -er .auth.client_token)"
+
+minted="$(api -X POST -H "X-Vault-Token: $token" --data '{"metadata":"{\"by\":\"seal-rotator\"}"}' \
+  "$VAULT/v1/auth/approle/role/$ROLE/secret-id")"
+new_accessor="$(jq -er .data.secret_id_accessor <<<"$minted")"
+jq -er .data.secret_id <<<"$minted" >"$STATE/secret-id.new"
+mv "$STATE/secret-id.new" "$STATE/secret-id"
+
+# Destroy every other secret-id of the role (the agent re-logs in with the new one).
+for accessor in $(api -X LIST -H "X-Vault-Token: $token" "$VAULT/v1/auth/approle/role/$ROLE/secret-id" | jq -r '.data.keys[]'); do
+  [[ "$accessor" == "$new_accessor" ]] && continue
+  api -X POST -H "X-Vault-Token: $token" --data "{\"secret_id_accessor\":\"$accessor\"}" \
+    "$VAULT/v1/auth/approle/role/$ROLE/secret-id-accessor/destroy" >/dev/null
+done
+api -X POST -H "X-Vault-Token: $token" "$VAULT/v1/auth/token/revoke-self" >/dev/null || true
+date -u +%Y-%m-%dT%H:%M:%SZ >"$STATE/rotator-last-success"
+echo "seal-rotator: rotated secret-id (accessor ${new_accessor:0:8}…)"

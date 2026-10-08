@@ -1,0 +1,100 @@
+---
+# agent.yml — the seal agent on gt-agent-1:
+#   1. what the agent already holds (secret-ids, read no_log)
+#   2. seal Vault side with Ansible's token: role-ids, secret-ids where needed
+#      (the AppRole structure is Terraform's: terraform/seal)
+#   3. Vault Agent (mTLS API proxy, forced token) + wall-clock secret-id rotator
+#   4. prove it from a cluster node, then write .build/seal-agent.json — the
+#      only thing that lets the cluster nodes start
+#
+#   make agent
+
+- name: Inventory
+  ansible.builtin.import_playbook: preamble.yml
+
+- name: What the agent already holds
+  hosts: agent
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Read the agent's secret-ids (contents suppressed)
+      ansible.builtin.slurp:
+        src: "{{ item }}"
+      loop: ["{{ agent_state_dir }}/secret-id", "{{ agent_conf_dir }}/approle/rotator-secret-id"]
+      register: seal_agent_files
+      failed_when: false
+      no_log: true
+
+    - name: Remember them (no_log)
+      ansible.builtin.set_fact:
+        seal_agent_current:
+          secret_id: "{{ (seal_agent_files.results[0].content | default('') | b64decode | trim) }}"
+          rotator_secret_id: "{{ (seal_agent_files.results[1].content | default('') | b64decode | trim) }}"
+      no_log: true
+
+- name: Seal Vault side (Ansible token)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Role-ids and secret-ids
+      ansible.builtin.include_role:
+        name: seal_agent
+        tasks_from: seal_vault.yml
+
+- name: Vault Agent and rotator
+  hosts: agent
+  become: true
+  gather_facts: false
+  roles:
+    - seal_agent
+
+- name: Prove the agent from a cluster node (mTLS, forced token)
+  hosts: vault
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Look up the agent's token through the proxy with the node's client certificate
+      run_once: true
+      ansible.builtin.uri:
+        url: "https://{{ hostvars[agent_node].ansible_host }}:{{ agent_port }}/v1/auth/token/lookup-self"
+        ca_path: "{{ vault_tls_dir }}/ca.crt"
+        client_cert: "{{ vault_tls_dir }}/server.crt"
+        client_key: "{{ vault_tls_dir }}/server.key"
+      check_mode: false
+      register: seal_agent_proof
+      retries: 10
+      delay: 3
+      until: seal_agent_proof.status == 200
+      no_log: true
+
+    - name: Require the autounseal policy and a live TTL
+      run_once: true
+      ansible.builtin.assert:
+        that:
+          - seal_policy_name in seal_agent_proof.json.data.policies
+          - seal_agent_proof.json.data.ttl | int > 0
+        fail_msg: The agent does not hold a valid autounseal token.
+        quiet: true
+
+    - name: Check for an existing marker
+      run_once: true
+      ansible.builtin.stat:
+        path: "{{ seal_agent_marker }}"
+      delegate_to: localhost
+      become: false
+      register: seal_agent_marker_file
+
+    - name: Write the marker (non-secret; first proof only)
+      run_once: true
+      ansible.builtin.copy:
+        content: >-
+          {{ {'ready': true, 'agent': agent_node,
+              'address': hostvars[agent_node].ansible_host ~ ':' ~ agent_port,
+              'proven_from': inventory_hostname,
+              'proven_at': now(utc=true).strftime('%Y-%m-%dT%H:%M:%SZ')} | to_nice_json }}
+        dest: "{{ seal_agent_marker }}"
+        mode: "0644"
+      delegate_to: localhost
+      become: false
+      when: not seal_agent_marker_file.stat.exists

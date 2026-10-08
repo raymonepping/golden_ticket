@@ -1,0 +1,59 @@
+---
+# Seal Vault side of the agent, with Ansible's own token (gt-ansible-seal):
+# read the role-ids and mint secret-ids only where the agent has none, or
+# where the one it has no longer exists in Vault (e.g. a rebuilt seal Vault).
+# The AppRole mount, roles and policies are Terraform's (terraform/seal).
+# Runs on localhost; every task touching a secret-id is no_log.
+
+- name: Address the seal Vault
+  ansible.builtin.set_fact:
+    seal_agent_seal_addr: "https://{{ hostvars[lab_seal_node].ansible_host }}:{{ vault_api_port }}"
+    seal_agent_token: "{{ lookup('file', tokens_dir ~ '/ansible-seal') | trim }}"
+  no_log: true
+
+- name: Talk to the seal Vault with the Ansible token
+  module_defaults:
+    ansible.builtin.uri:
+      ca_path: "{{ vault_ca_cert }}"
+      headers:
+        X-Vault-Token: "{{ seal_agent_token }}"
+  no_log: true
+  block:
+    - name: Read the role-ids
+      ansible.builtin.uri:
+        url: "{{ seal_agent_seal_addr }}/v1/auth/approle/role/{{ item }}/role-id"
+      check_mode: false
+      loop: ["{{ seal_approle }}", "{{ seal_rotator_approle }}"]
+      register: seal_agent_role_ids
+
+    - name: Expose the role-ids
+      ansible.builtin.set_fact:
+        seal_agent_role_id: "{{ seal_agent_role_ids.results[0].json.data.role_id }}"
+        seal_agent_rotator_role_id: "{{ seal_agent_role_ids.results[1].json.data.role_id }}"
+
+    - name: Check that the agent's current secret-ids still exist in Vault
+      ansible.builtin.uri:
+        url: "{{ seal_agent_seal_addr }}/v1/auth/approle/role/{{ item.role }}/secret-id/lookup"
+        method: POST
+        body_format: json
+        body: { secret_id: "{{ item.value }}" }
+        status_code: [200, 204, 404]
+      check_mode: false
+      loop:
+        - { role: "{{ seal_approle }}", value: "{{ hostvars[agent_node].seal_agent_current.secret_id | default('') }}" }
+        - { role: "{{ seal_rotator_approle }}", value: "{{ hostvars[agent_node].seal_agent_current.rotator_secret_id | default('') }}" }
+      when: item.value | length > 0
+      register: seal_agent_lookup
+
+    - name: Mint secret-ids where the agent has none, or a dead one
+      ansible.builtin.uri:
+        url: "{{ seal_agent_seal_addr }}/v1/auth/approle/role/{{ item.item.role }}/secret-id"
+        method: POST
+        body_format: json
+        body: { metadata: "{\"by\":\"ansible\"}" }
+      changed_when: true
+      loop: "{{ seal_agent_lookup.results }}"
+      loop_control:
+        label: "{{ item.item.role }}"
+      when: item.skipped | default(false) or item.status != 200 or item.json is not defined or item.json.data is not defined
+      register: seal_agent_minted

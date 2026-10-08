@@ -1,0 +1,14 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Rotate the seal agent's secret-id every {{ seal_rotate_every }}
+
+[Timer]
+OnBootSec=10min
+# Wall-clock schedule: a monotonic interval (OnUnitActiveSec) stands still
+# while the Mac sleeps and the VM is paused. Persistent=true catches up a
+# missed slot as soon as chrony has stepped the clock forward.
+OnCalendar={{ seal_rotate_calendar }}
+Persistent=true
+
+[Install]
+WantedBy=timers.target

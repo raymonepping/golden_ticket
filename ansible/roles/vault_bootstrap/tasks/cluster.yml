@@ -1,0 +1,161 @@
+---
+# The transit-auto-unsealed cluster: init once with recovery keys, confirm
+# every node unsealed itself (through the seal agent) and joined, then the two
+# bootstrap tokens (Terraform: structure, Ansible: configuration). Runs on
+# localhost; secrets are no_log throughout. The root token is used only here.
+
+- name: Address the cluster nodes
+  ansible.builtin.set_fact:
+    vault_bootstrap_leader_addr: "https://{{ hostvars[vault_leader].ansible_host }}:{{ vault_api_port }}"
+    vault_bootstrap_followers: "{{ groups['vault'] | difference([vault_leader]) | sort }}"
+
+- name: Wait for the leader API
+  ansible.builtin.uri:
+    url: "{{ vault_bootstrap_leader_addr }}/v1/sys/seal-status"
+    ca_path: "{{ vault_ca_cert }}"
+  check_mode: false
+  register: vault_bootstrap_leader_status
+  until: vault_bootstrap_leader_status.status == 200
+  retries: 60
+  delay: 3
+
+- name: Check for controller cluster initialisation material
+  ansible.builtin.stat:
+    path: "{{ vault_init_path }}"
+  register: vault_bootstrap_init_file
+
+- name: Protect an initialised cluster from lost material
+  ansible.builtin.assert:
+    that: vault_bootstrap_leader_status.json.initialized == vault_bootstrap_init_file.stat.exists
+    fail_msg: >-
+      The cluster initialised={{ vault_bootstrap_leader_status.json.initialized }} but
+      {{ vault_init_path }} exists={{ vault_bootstrap_init_file.stat.exists }}. Restore the
+      correct file; it is never overwritten and Vault is never reinitialised.
+    quiet: true
+
+- name: Require the transit seal on the leader
+  ansible.builtin.assert:
+    that: vault_bootstrap_leader_status.json.type == 'transit'
+    fail_msg: "{{ vault_leader }} reports seal type {{ vault_bootstrap_leader_status.json.type }}, expected transit."
+    quiet: true
+
+- name: Initialise the cluster exactly once
+  when: not vault_bootstrap_leader_status.json.initialized
+  no_log: true
+  block:
+    - name: Initialise the cluster (recovery keys)
+      ansible.builtin.uri:
+        url: "{{ vault_bootstrap_leader_addr }}/v1/sys/init"
+        ca_path: "{{ vault_ca_cert }}"
+        method: PUT
+        body_format: json
+        body:
+          recovery_shares: "{{ recovery_shares | int }}"
+          recovery_threshold: "{{ recovery_threshold | int }}"
+      register: vault_bootstrap_init_result
+      changed_when: true
+
+    - name: Persist the cluster initialisation material
+      ansible.builtin.copy:
+        content: "{{ vault_bootstrap_init_result.json | to_nice_json }}\n"
+        dest: "{{ vault_init_path }}"
+        mode: "0600"
+      diff: false
+
+- name: Load the cluster initialisation material
+  ansible.builtin.set_fact:
+    vault_bootstrap_init: "{{ lookup('file', vault_init_path) | from_json }}"
+  no_log: true
+  when: not ansible_check_mode or vault_bootstrap_init_file.stat.exists
+
+- name: Wait for the leader to auto-unseal
+  ansible.builtin.uri:
+    url: "{{ vault_bootstrap_leader_addr }}/v1/sys/seal-status"
+    ca_path: "{{ vault_ca_cert }}"
+  check_mode: false
+  register: vault_bootstrap_leader_unsealed
+  until: vault_bootstrap_leader_unsealed.json.initialized | default(false) and not vault_bootstrap_leader_unsealed.json.sealed
+  retries: 40
+  delay: 3
+
+- name: Give followers time to auto-join through retry_join
+  ansible.builtin.uri:
+    url: "https://{{ hostvars[item].ansible_host }}:{{ vault_api_port }}/v1/sys/seal-status"
+    ca_path: "{{ vault_ca_cert }}"
+  check_mode: false
+  loop: "{{ vault_bootstrap_followers }}"
+  register: vault_bootstrap_follower_status
+  until: vault_bootstrap_follower_status.json.initialized | default(false) and not vault_bootstrap_follower_status.json.sealed
+  retries: 30
+  delay: 3
+  failed_when: false
+
+- name: Join a follower explicitly when retry_join has not (fallback)
+  ansible.builtin.uri:
+    url: "https://{{ hostvars[item.item].ansible_host }}:{{ vault_api_port }}/v1/sys/storage/raft/join"
+    ca_path: "{{ vault_ca_cert }}"
+    method: POST
+    body_format: json
+    body:
+      leader_api_addr: "https://{{ vault_leader }}:{{ vault_api_port }}"
+      leader_ca_cert: "{{ lookup('file', vault_ca_cert) }}"
+  loop: "{{ vault_bootstrap_follower_status.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  changed_when: true
+  when: not (item.json.initialized | default(false))
+
+- name: Require every follower initialised and auto-unsealed
+  ansible.builtin.uri:
+    url: "https://{{ hostvars[item].ansible_host }}:{{ vault_api_port }}/v1/sys/seal-status"
+    ca_path: "{{ vault_ca_cert }}"
+  check_mode: false
+  loop: "{{ vault_bootstrap_followers }}"
+  register: vault_bootstrap_follower_ready
+  until: vault_bootstrap_follower_ready.json.initialized | default(false) and not vault_bootstrap_follower_ready.json.sealed
+  retries: 40
+  delay: 3
+
+- name: Find the active node
+  ansible.builtin.uri:
+    url: "{{ vault_bootstrap_leader_addr }}/v1/sys/leader"
+    ca_path: "{{ vault_ca_cert }}"
+  check_mode: false
+  register: vault_bootstrap_leader
+  until: vault_bootstrap_leader.json.leader_address | default('') | length > 0
+  retries: 20
+  delay: 3
+
+- name: Bootstrap tokens on the cluster
+  ansible.builtin.include_tasks: tokens.yml
+  vars:
+    bt_addr: "{{ vault_bootstrap_leader.json.leader_address }}"
+    bt_root_token: "{{ vault_bootstrap_init.root_token }}"
+    bt_tokens: "{{ cluster_bootstrap_tokens }}"
+  when: vault_bootstrap_init is defined
+
+- name: Read the Raft configuration (Ansible's own token)
+  ansible.builtin.uri:
+    url: "{{ vault_bootstrap_leader.json.leader_address }}/v1/sys/storage/raft/configuration"
+    ca_path: "{{ vault_ca_cert }}"
+    headers:
+      X-Vault-Token: "{{ lookup('file', tokens_dir ~ '/ansible-platform') | trim }}"
+  check_mode: false
+  register: vault_bootstrap_raft
+  no_log: true
+  # Autopilot promotes new peers to voters after a short stabilisation.
+  until: >-
+    vault_bootstrap_raft.json.data.config.servers
+    | selectattr('voter', 'equalto', true) | list | length == groups['vault'] | length
+  retries: 20
+  delay: 3
+  when: vault_bootstrap_init is defined
+
+- name: Require three Raft voters
+  ansible.builtin.assert:
+    that: >-
+      vault_bootstrap_raft.json.data.config.servers
+      | selectattr('voter', 'equalto', true) | list | length == groups['vault'] | length
+    fail_msg: The cluster does not have {{ groups['vault'] | length }} Raft voters.
+    quiet: true
+  when: vault_bootstrap_raft is not skipped

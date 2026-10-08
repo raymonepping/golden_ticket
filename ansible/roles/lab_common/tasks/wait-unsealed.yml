@@ -8,7 +8,7 @@
   delegate_to: localhost
   become: false
   check_mode: false
-  register: wu_status
-  until: wu_status.status == 200 and (not wu_status.json.initialized or not wu_status.json.sealed)
+  register: lab_common_wu_status
+  until: lab_common_wu_status.status == 200 and (not lab_common_wu_status.json.initialized or not lab_common_wu_status.json.sealed)
   retries: 60
   delay: 3

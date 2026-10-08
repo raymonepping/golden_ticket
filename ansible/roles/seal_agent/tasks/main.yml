@@ -1,0 +1,158 @@
+---
+# Vault Agent + secret-id rotator on the agent node. The Vault binary is
+# installed by converge (vault_install); the AppRole structure by
+# terraform/seal; secret-ids by seal_vault.yml (Ansible token).
+
+- name: Create the agent account
+  ansible.builtin.user:
+    name: "{{ agent_user }}"
+    system: true
+    shell: /sbin/nologin
+    home: "{{ agent_state_dir }}"
+    create_home: false
+
+- name: Create the agent directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ agent_user }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ agent_conf_dir }}", owner: root, mode: "0750" }
+    - { path: "{{ agent_conf_dir }}/tls", owner: root, mode: "0750" }
+    - { path: "{{ agent_conf_dir }}/approle", owner: root, mode: "0750" }
+    - { path: "{{ agent_state_dir }}", owner: "{{ agent_user }}", mode: "0700" }
+
+# ── TLS: server cert for the mTLS listener (also a client of the seal Vault) ─
+- name: Issue the agent certificate
+  ansible.builtin.include_role:
+    name: vault_tls
+    tasks_from: issue.yml
+
+- name: Trust the lab CA on the node
+  ansible.builtin.include_role:
+    name: vault_tls
+    tasks_from: anchor.yml
+
+- name: Install the agent CA and certificate
+  ansible.builtin.copy:
+    src: "{{ tls_dir }}/{{ item.src }}"
+    dest: "{{ agent_conf_dir }}/tls/{{ item.dest }}"
+    owner: root
+    group: "{{ agent_user }}"
+    mode: "0644"
+  loop:
+    - { src: ca.crt, dest: ca.crt }
+    - { src: "{{ inventory_hostname }}.crt", dest: server.crt }
+  loop_control:
+    label: "{{ item.dest }}"
+  notify: Restart vault-agent
+
+- name: Install the agent private key (contents suppressed)
+  ansible.builtin.copy:
+    src: "{{ tls_dir }}/{{ inventory_hostname }}.key"
+    dest: "{{ agent_conf_dir }}/tls/server.key"
+    owner: root
+    group: "{{ agent_user }}"
+    mode: "0640"
+  no_log: true
+  diff: false
+  notify: Restart vault-agent
+
+# ── AppRole identity ─────────────────────────────────────────────────────────
+- name: Install the role-ids
+  ansible.builtin.copy:
+    content: "{{ item.value }}\n"
+    dest: "{{ agent_conf_dir }}/approle/{{ item.file }}"
+    owner: root
+    group: "{{ agent_user }}"
+    mode: "0640"
+  loop:
+    - { file: role-id, value: "{{ hostvars['localhost'].seal_agent_role_id }}" }
+    - { file: rotator-role-id, value: "{{ hostvars['localhost'].seal_agent_rotator_role_id }}" }
+  loop_control:
+    label: "{{ item.file }}"
+  no_log: true
+  notify: Restart vault-agent
+
+- name: Install freshly minted secret-ids (only where the agent had none, or a dead one)
+  ansible.builtin.copy:
+    content: "{{ item.json.data.secret_id }}\n"
+    dest: "{{ (agent_state_dir ~ '/secret-id') if item.item.item.role == seal_approle else (agent_conf_dir ~ '/approle/rotator-secret-id') }}"
+    owner: "{{ agent_user if item.item.item.role == seal_approle else 'root' }}"
+    group: "{{ agent_user }}"
+    mode: "{{ '0600' if item.item.item.role == seal_approle else '0640' }}"
+  loop: "{{ hostvars['localhost'].seal_agent_minted.results | default([]) | selectattr('json', 'defined') | list }}"
+  no_log: true
+  diff: false
+  notify: Restart vault-agent
+
+# ── Agent + rotator ──────────────────────────────────────────────────────────
+- name: Render the agent configuration
+  ansible.builtin.template:
+    src: agent.hcl.j2
+    dest: "{{ agent_conf_dir }}/agent.hcl"
+    owner: root
+    group: "{{ agent_user }}"
+    mode: "0640"
+  notify: Restart vault-agent
+
+- name: Install the agent and rotator units
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "/etc/systemd/system/{{ item.dest }}"
+    mode: "0644"
+  loop:
+    - { src: vault-agent.service.j2, dest: vault-agent.service }
+    - { src: seal-rotator.service.j2, dest: seal-rotator.service }
+    - { src: seal-rotator.timer.j2, dest: seal-rotator.timer }
+  loop_control:
+    label: "{{ item.dest }}"
+  notify: Restart vault-agent
+
+- name: Install the rotator
+  ansible.builtin.template:
+    src: seal-rotate.sh.j2
+    dest: /usr/local/libexec/gt-seal-rotate
+    mode: "0755"
+
+- name: Admit only the cluster nodes to the agent listener
+  ansible.builtin.include_role:
+    name: lab_common
+    tasks_from: firewall-port
+  vars:
+    lab_common_fw_port: "{{ agent_port }}"
+    lab_common_fw_sources: "{{ groups['vault'] | map('extract', hostvars, 'ansible_host') | list }}"
+
+- name: Start the agent and the rotation timer
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    state: started
+    enabled: true
+    daemon_reload: true
+  loop: [vault-agent, seal-rotator.timer]
+
+- name: Apply any pending agent restart now
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for the agent to hold a token (loopback metrics answer)
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ agent_metrics_port }}/agent/v1/metrics"
+  register: seal_agent_metrics
+  check_mode: false
+  retries: 20
+  delay: 3
+  until: seal_agent_metrics.status == 200
+
+- name: Check for a first rotation
+  ansible.builtin.stat:
+    path: "{{ agent_state_dir }}/rotator-last-success"
+  register: seal_agent_rotated
+
+- name: Rotate once now so the evidence exists from the start
+  ansible.builtin.systemd_service:
+    name: seal-rotator.service
+    state: started
+  changed_when: true
+  when: not seal_agent_rotated.stat.exists

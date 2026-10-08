@@ -1,0 +1,50 @@
+# {{ ansible_managed }}
+# Seal agent: AppRole identity on the seal Vault; serves the cluster's
+# transit seal through an mTLS API proxy that injects its own token.
+pid_file = "/run/vault-agent/pid"
+
+vault {
+  address = "https://{{ hostvars[lab_seal_node].ansible_host }}:{{ vault_api_port }}"
+  ca_cert = "{{ agent_conf_dir }}/tls/ca.crt"
+}
+
+auto_auth {
+  method "approle" {
+    mount_path = "auth/approle"
+    min_backoff = "2s"
+    max_backoff = "30s"
+    config = {
+      role_id_file_path                   = "{{ agent_conf_dir }}/approle/role-id"
+      secret_id_file_path                 = "{{ agent_state_dir }}/secret-id"
+      remove_secret_id_file_after_reading = false
+    }
+  }
+}
+
+# Every proxied request carries the agent's token, whatever the client sent.
+api_proxy {
+  use_auto_auth_token = "force"
+}
+
+# Cluster nodes only: client certificate from the lab CA required, and
+# firewalld admits only the three cluster addresses.
+listener "tcp" {
+  address                            = "{{ ansible_host }}:{{ agent_port }}"
+  tls_cert_file                      = "{{ agent_conf_dir }}/tls/server.crt"
+  tls_key_file                       = "{{ agent_conf_dir }}/tls/server.key"
+  tls_client_ca_file                 = "{{ agent_conf_dir }}/tls/ca.crt"
+  tls_require_and_verify_client_cert = true
+  tls_min_version                    = "tls12"
+}
+
+# Loopback metrics for the read-only node probe.
+listener "tcp" {
+  address     = "127.0.0.1:{{ agent_metrics_port }}"
+  tls_disable = true
+  role        = "metrics_only"
+}
+
+telemetry {
+  prometheus_retention_time = "60s"
+  disable_hostname          = true
+}

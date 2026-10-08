@@ -1,0 +1,38 @@
+---
+# bootstrap.yml — the cluster, once the seal agent is proven:
+#   start the nodes (one at a time), init once (recovery keys; the barrier key
+#   is wrapped by the seal Vault's Transit key through the agent), raft join,
+#   then the tf-platform + ansible-platform bootstrap tokens.
+#
+#   make bootstrap
+
+- name: Inventory
+  ansible.builtin.import_playbook: preamble.yml
+
+- name: Require the proven seal agent
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Require .build/seal-agent.json
+      ansible.builtin.assert:
+        that: vault_cluster_may_start | bool
+        fail_msg: The seal agent is not proven yet; run 'make seal agent' first.
+        quiet: true
+
+- name: Start the cluster nodes
+  hosts: vault
+  become: true
+  gather_facts: false
+  roles:
+    - vault_configure
+
+- name: Cluster
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Initialise, join and issue the bootstrap tokens
+      ansible.builtin.include_role:
+        name: vault_bootstrap
+        tasks_from: cluster.yml

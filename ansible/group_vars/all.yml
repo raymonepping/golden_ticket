@@ -95,3 +95,15 @@ lab_service_probes:
   proxy: { units: [haproxy], url: "https://{{ ansible_host | default('127.0.0.1') }}:8200/v1/sys/health" }
   identity: { units: [keycloak, openldap], url: "https://127.0.0.1:9000/health/ready" }
   ux: { units: [gt-ux], url: "https://127.0.0.1:3443/api/health" }
+
+# ── Seal agent on gt-agent-1 (structure: terraform/seal) ─────────────────────
+agent_user: vaultagent
+agent_conf_dir: /etc/vault-agent
+agent_state_dir: /var/lib/vault-agent
+seal_approle: gt-seal-autounseal
+seal_rotator_approle: gt-seal-rotator
+seal_policy_name: autounseal
+seal_rotate_every: 6h
+# Wall-clock slots (00/06/12/18 h) with Persistent=true: a monotonic interval
+# stands still while the Mac sleeps (red_pass c6fc9de).
+seal_rotate_calendar: "*-*-* 00/6:00:00"

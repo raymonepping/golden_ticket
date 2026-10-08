@@ -54,6 +54,8 @@
       tags: [configure]
 
     - name: Wait until this node is unsealed again
-      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/wait-unsealed.yml"
+      ansible.builtin.include_role:
+        name: lab_common
+        tasks_from: wait-unsealed
       when: vault_cluster_may_start | bool
       tags: [configure]

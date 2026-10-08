@@ -27,7 +27,14 @@ for f in seal-init vault-init; do
     i=$((i + 1))
   done < <(jq -r '(.keys_base64 // []) + (.keys // []) + (.recovery_keys_base64 // []) + (.recovery_keys // []) | .[]' "${json}")
 done
-# Extra values (identity secrets, secret-ids) may be supplied by later phases
+# The seal agent's live secret-ids (read over multipass exec, never printed).
+if command -v multipass >/dev/null 2>&1; then
+  for f in /var/lib/vault-agent/secret-id /etc/vault-agent/approle/rotator-secret-id; do
+    v="$(multipass exec gt-agent-1 -- sudo cat "${f}" 2>/dev/null | tr -d '\n' || true)"
+    [[ -n "${v}" ]] && values["agent:${f##*/}"]="${v}"
+  done
+fi
+# Extra values (identity secrets) may be supplied by later phases
 # as a 0600 file of label<TAB>value lines; it is read, never printed.
 if [[ -f "${CACHE_DIR}/secret-scan.extra" ]]; then
   while IFS=$'\t' read -r label value; do

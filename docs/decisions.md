@@ -121,3 +121,14 @@ failed apply that broke ("Invalid index") exactly when preflight mattered most.
 definition of the topology. Terraform loads it automatically (the variable
 keeps its validations; `terraform test` uses it too). Ansible reads the same
 file as plain JSON, without evaluating any state.
+
+## D8 — AppRole CIDRs round-trip (2026-10-08)
+
+**Observed.** Vault stores `token_bound_cidrs = ["x/32"]` as bare `x`
+(`secret_id_bound_cidrs` keeps `/32`). With bare `x` in configuration the plan
+was empty, but `hashicorp/vault` 5.11.0 warned "invalid CIDR … will be
+enforced in future releases". With `x/32` the plan is also empty (the
+provider normalises the stored value) and the warning is gone.
+
+**Decision.** `terraform/seal` writes `/32` for both lists. Ansible validation
+normalises before comparing (as red_pass does).

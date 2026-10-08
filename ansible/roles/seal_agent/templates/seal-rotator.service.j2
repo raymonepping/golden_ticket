@@ -1,0 +1,16 @@
+# {{ ansible_managed }}
+[Unit]
+Description=golden_ticket seal-agent secret-id rotation
+After=network-online.target vault-agent.service
+
+[Service]
+Type=oneshot
+User={{ agent_user }}
+Group={{ agent_user }}
+ExecStart=/usr/local/libexec/gt-seal-rotate
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadOnlyPaths={{ agent_conf_dir }}
+ReadWritePaths={{ agent_state_dir }}

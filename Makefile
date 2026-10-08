@@ -72,3 +72,22 @@ status: ## vault status for every Vault node
 
 boundary: ## Prove each bootstrap token can do only its own tool's job (sys/capabilities-self)
 	./scripts/boundary-check.sh
+
+# ── The seal chain (prompt 04) ───────────────────────────────────────────────
+.PHONY: seal-plan seal agent bootstrap seal-rotate
+
+seal-plan: ## Plan the seal Vault's structure (gt-tf-seal token)
+	$(TF) seal plan
+
+seal: ## Terraform: transit mount + autounseal key, seal policies, AppRole roles
+	$(TF) seal apply
+
+agent: ## Ansible: secret-ids, Vault Agent (mTLS proxy) + rotator, proven from a cluster node
+	$(RUN) agent
+
+bootstrap: ## Ansible: start the cluster, init (recovery keys), raft join, tf-platform + ansible-platform tokens
+	$(RUN) bootstrap
+
+seal-rotate: ## Rotate the seal agent's secret-id now (normally on the wall-clock schedule)
+	multipass exec gt-agent-1 -- sudo systemctl start seal-rotator.service
+	multipass exec gt-agent-1 -- sudo journalctl -u seal-rotator -n 3 --no-pager -o cat
