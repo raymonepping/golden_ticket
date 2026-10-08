@@ -1,0 +1,35 @@
+---
+# One local CA for the whole estate and a certificate per node with its
+# name, localhost and current IP as SANs. Keys stay under .secrets/tls.
+# Ported from multi_pass.
+
+- name: Issue the lab CA and this node's certificate
+  ansible.builtin.include_tasks: issue.yml
+
+- name: Push the CA and node certificates to the node
+  ansible.builtin.copy:
+    src: "{{ tls_dir }}/{{ item.src }}"
+    dest: "{{ vault_tls_dir }}/{{ item.dest }}"
+    owner: vault
+    group: vault
+    mode: "0644"
+  loop:
+    - { src: ca.crt, dest: ca.crt }
+    - { src: "{{ inventory_hostname }}.crt", dest: server.crt }
+  loop_control:
+    label: "{{ item.dest }}"
+  notify: Restart vault
+
+- name: Push the node private key (contents suppressed, also under --diff)
+  ansible.builtin.copy:
+    src: "{{ tls_dir }}/{{ inventory_hostname }}.key"
+    dest: "{{ vault_tls_dir }}/server.key"
+    owner: vault
+    group: vault
+    mode: "0600"
+  no_log: true
+  diff: false
+  notify: Restart vault
+
+- name: Trust the lab CA on the node
+  ansible.builtin.include_tasks: anchor.yml

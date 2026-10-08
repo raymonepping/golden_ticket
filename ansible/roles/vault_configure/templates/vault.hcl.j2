@@ -1,0 +1,51 @@
+# {{ ansible_managed }}
+ui            = true
+disable_mlock = true
+api_addr      = "https://{{ ansible_host }}:{{ vault_api_port }}"
+cluster_addr  = "https://{{ ansible_host }}:{{ vault_cluster_port }}"
+license_path  = "{{ vault_license_dest }}"
+log_level     = "info"
+
+{% if inventory_hostname in groups['vault'] %}
+# Auto-unseal through the seal agent on {{ agent_node }}: an mTLS API proxy
+# that injects its own AppRole token (use_auto_auth_token = "force"). This node
+# holds no seal credential. The token value below is a required placeholder:
+# the agent replaces it on every request.
+seal "transit" {
+  address         = "https://{{ hostvars[agent_node].ansible_host }}:{{ agent_port }}"
+  mount_path      = "{{ seal_transit_mount }}/"
+  key_name        = "{{ seal_transit_key }}"
+  tls_ca_cert     = "{{ vault_tls_dir }}/ca.crt"
+  tls_client_cert = "{{ vault_tls_dir }}/server.crt"
+  tls_client_key  = "{{ vault_tls_dir }}/server.key"
+  token           = "agent-supplied"
+  disable_renewal = "true"
+}
+
+{% endif %}
+storage "raft" {
+  path    = "{{ vault_data_dir }}"
+  node_id = "{{ inventory_hostname }}"
+{% if inventory_hostname in groups['vault'] %}
+{% for peer in groups['vault'] | sort if peer != inventory_hostname %}
+
+  retry_join {
+    leader_api_addr     = "https://{{ peer }}:{{ vault_api_port }}"
+    leader_ca_cert_file = "{{ vault_tls_dir }}/ca.crt"
+  }
+{% endfor %}
+{% endif %}
+}
+
+listener "tcp" {
+  address            = "0.0.0.0:{{ vault_api_port }}"
+  cluster_address    = "0.0.0.0:{{ vault_cluster_port }}"
+  tls_cert_file      = "{{ vault_tls_dir }}/server.crt"
+  tls_key_file       = "{{ vault_tls_dir }}/server.key"
+  tls_client_ca_file = "{{ vault_tls_dir }}/ca.crt"
+  tls_min_version    = "tls12"
+}
+
+telemetry {
+  disable_hostname = true
+}

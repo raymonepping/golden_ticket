@@ -1,0 +1,116 @@
+---
+# Controller side: the lab CA (created once) and a certificate for
+# inventory_hostname with its name, localhost and current IP as SANs.
+# Reused by service nodes through include_role tasks_from: issue.yml.
+
+- name: Ensure the controller TLS directory exists
+  ansible.builtin.file:
+    path: "{{ tls_dir }}"
+    state: directory
+    mode: "0700"
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Inspect the existing CA pair
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop: ["{{ tls_dir }}/ca.crt", "{{ tls_dir }}/ca.key"]
+  register: vault_tls_ca_files
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Refuse an incomplete CA pair
+  ansible.builtin.assert:
+    that: (vault_tls_ca_files.results | map(attribute='stat.exists') | unique | length) == 1
+    fail_msg: >-
+      The local CA certificate/key pair is incomplete. Restore it from backup;
+      a replacement is never generated silently for an existing lab.
+    quiet: true
+  run_once: true
+
+- name: Create the lab CA
+  when: not vault_tls_ca_files.results[0].stat.exists
+  delegate_to: localhost
+  become: false
+  run_once: true
+  block:
+    - name: Generate the CA private key
+      community.crypto.openssl_privatekey:
+        path: "{{ tls_dir }}/ca.key"
+        size: 4096
+        mode: "0600"
+
+    - name: Generate the CA CSR
+      community.crypto.openssl_csr_pipe:
+        privatekey_path: "{{ tls_dir }}/ca.key"
+        common_name: golden_ticket Vault Lab CA
+        use_common_name_for_san: false
+        basic_constraints: ["CA:TRUE"]
+        basic_constraints_critical: true
+        key_usage: [keyCertSign, cRLSign]
+        key_usage_critical: true
+      register: vault_tls_ca_csr
+
+    - name: Self-sign the CA certificate
+      community.crypto.x509_certificate:
+        path: "{{ tls_dir }}/ca.crt"
+        csr_content: "{{ vault_tls_ca_csr.csr }}"
+        privatekey_path: "{{ tls_dir }}/ca.key"
+        provider: selfsigned
+        selfsigned_not_after: "+3650d"
+        mode: "0644"
+
+- name: Inspect the existing node certificate
+  community.crypto.x509_certificate_info:
+    path: "{{ tls_dir }}/{{ inventory_hostname }}.crt"
+  register: vault_tls_node_cert
+  delegate_to: localhost
+  become: false
+  failed_when: false
+
+- name: Decide whether the node certificate needs (re)issuing
+  ansible.builtin.set_fact:
+    vault_tls_reissue: >-
+      {{ vault_tls_node_cert.subject_alt_name is not defined
+         or vault_tls_node_cert.expired | default(true)
+         or ('IP:' ~ ansible_host) not in vault_tls_node_cert.subject_alt_name
+         or (tls_extra_dns_names | default([]) | map('regex_replace', '^', 'DNS:') | list
+             | difference(vault_tls_node_cert.subject_alt_name) | length > 0) }}
+
+- name: Issue the node certificate
+  when: vault_tls_reissue | bool
+  delegate_to: localhost
+  become: false
+  block:
+    - name: Generate the node private key
+      community.crypto.openssl_privatekey:
+        path: "{{ tls_dir }}/{{ inventory_hostname }}.key"
+        size: 3072
+        mode: "0600"
+
+    - name: Generate the node CSR
+      community.crypto.openssl_csr_pipe:
+        privatekey_path: "{{ tls_dir }}/{{ inventory_hostname }}.key"
+        common_name: "{{ inventory_hostname }}"
+        subject_alt_name: >-
+          {{ ['DNS:' ~ inventory_hostname, 'DNS:localhost', 'IP:' ~ ansible_host, 'IP:127.0.0.1']
+             + (tls_extra_dns_names | default([]) | map('regex_replace', '^', 'DNS:') | list) }}
+        extended_key_usage: [serverAuth, clientAuth]
+      register: vault_tls_node_csr
+
+    - name: Sign the node certificate with the lab CA
+      community.crypto.x509_certificate:
+        path: "{{ tls_dir }}/{{ inventory_hostname }}.crt"
+        csr_content: "{{ vault_tls_node_csr.csr }}"
+        provider: ownca
+        ownca_path: "{{ tls_dir }}/ca.crt"
+        ownca_privatekey_path: "{{ tls_dir }}/ca.key"
+        # Apple (and so Chrome on macOS) rejects TLS server certificates valid
+        # for more than 825 days; 800 d + the 1 h skew margin stays under it.
+        ownca_not_after: "+800d"
+        # Tolerate guest clock skew: a fresh cert is never "not yet valid".
+        ownca_not_before: "-1h"
+        mode: "0644"
+        force: true

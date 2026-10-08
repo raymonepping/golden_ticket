@@ -1,0 +1,69 @@
+---
+# Vault configuration and the hardened systemd unit. Cluster nodes get the
+# transit seal stanza pointing at the seal agent (mTLS, no token), raft
+# retry_join and the seal-wait guard; the seal Vault is a standalone
+# single-node raft cluster. Peer names resolve through the baseline's
+# /etc/hosts block.
+
+- name: Require TLS material and the license on the node
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ vault_tls_dir }}/ca.crt"
+    - "{{ vault_tls_dir }}/server.crt"
+    - "{{ vault_license_dest }}"
+  register: vault_configure_prereq
+  failed_when: not vault_configure_prereq.stat.exists
+
+- name: Render vault.hcl
+  ansible.builtin.template:
+    src: vault.hcl.j2
+    dest: "{{ vault_config_file }}"
+    owner: root
+    group: vault
+    mode: "0640"
+  notify: Restart vault
+
+- name: Install the seal-wait guard
+  ansible.builtin.template:
+    src: vault-wait-seal.j2
+    dest: /usr/local/bin/vault-wait-seal
+    owner: root
+    group: root
+    mode: "0755"
+  when: inventory_hostname in groups['vault']
+
+- name: Install the hardened systemd unit
+  ansible.builtin.template:
+    src: vault.service.j2
+    dest: /etc/systemd/system/vault.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart vault
+
+# Cluster nodes start only once the seal agent has been proven from a cluster
+# node (.build/seal-agent.json, ansible/agent.yml). Before that they are
+# configured and enabled-for-later, but inactive.
+- name: Decide whether the service may start
+  ansible.builtin.set_fact:
+    vault_configure_may_start: "{{ inventory_hostname == lab_seal_node or vault_cluster_may_start | bool }}"
+
+- name: Enable and start Vault
+  ansible.builtin.systemd_service:
+    name: vault
+    state: started
+    enabled: true
+    daemon_reload: true
+  when: vault_configure_may_start | bool
+
+- name: Load the unit (not started) while the seal agent is not proven
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  changed_when: false
+  when: not vault_configure_may_start | bool
+
+- name: Report cluster nodes waiting for the seal agent
+  ansible.builtin.debug:
+    msg: "{{ inventory_hostname }} waits for the seal agent (make agent) before its first start."
+  when: not vault_configure_may_start | bool

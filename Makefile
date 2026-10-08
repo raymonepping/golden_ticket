@@ -54,3 +54,21 @@ destroy: ## Destroy ONLY the gt-* VMs (Terraform confirmation)
 
 rhel-unregister: ## Unregister the gt-* guests from RHSM (CONFIRM_RHSM_UNREGISTER=yes)
 	$(RUN) rhel-unregister
+
+# ── Vault convergence and the seal Vault (prompt 03) ─────────────────────────
+.PHONY: converge seal-init unseal status boundary
+
+converge: deps ## Ansible: baseline again (changed=0), probe, Vault install/TLS/licence/config (TAGS=...)
+	$(RUN) converge
+
+seal-init: ## Ansible: seal Vault init (Shamir 1/1), unseal, tf-seal + ansible-seal tokens
+	$(RUN) seal-init
+
+unseal: ## Unseal gt-vault-s (one key); the cluster then auto-unseals through the agent
+	$(RUN) unseal
+
+status: ## vault status for every Vault node
+	./scripts/status.sh
+
+boundary: ## Prove each bootstrap token can do only its own tool's job (sys/capabilities-self)
+	./scripts/boundary-check.sh

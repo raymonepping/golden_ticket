@@ -1,0 +1,59 @@
+---
+# converge.yml — Ansible decorates: guest OS and Vault on every node.
+#
+#   make converge            (TAGS=tls etc. to run one role)
+#
+# The RHEL baseline already ran inside `terraform apply`; running it again
+# here must report changed=0 (and keeps OS drift visible in check mode).
+# Cluster nodes are configured but only start once the seal agent is proven
+# (make agent, prompt 04).
+
+- name: Inventory
+  ansible.builtin.import_playbook: preamble.yml
+
+- name: Baseline and probe on every node
+  hosts: gt
+  become: true
+  gather_facts: true
+  roles:
+    - { role: rhel_baseline, tags: [rhel] }
+    - { role: lab_probe, tags: [probe] }
+
+- name: Vault binary on the Vault nodes and the seal agent
+  hosts: vault:vault_seal:agent
+  become: true
+  gather_facts: false
+  roles:
+    - { role: vault_install, tags: [install] }
+
+- name: TLS and licence on the Vault servers
+  hosts: vault:vault_seal
+  become: true
+  gather_facts: false
+  roles:
+    - { role: vault_tls, tags: [tls] }
+    - { role: vault_license, tags: [license] }
+
+- name: Configure the seal Vault
+  hosts: vault_seal
+  become: true
+  gather_facts: false
+  roles:
+    - { role: vault_configure, tags: [configure] }
+
+- name: Configure the transit-sealed cluster nodes (one at a time)
+  hosts: vault
+  become: true
+  gather_facts: false
+  serial: 1
+  roles:
+    - { role: vault_configure, tags: [configure] }
+  post_tasks:
+    - name: Apply any restart now
+      ansible.builtin.meta: flush_handlers
+      tags: [configure]
+
+    - name: Wait until this node is unsealed again
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/wait-unsealed.yml"
+      when: vault_cluster_may_start | bool
+      tags: [configure]

@@ -1,0 +1,22 @@
+---
+# The Vault Enterprise license comes only from VAULT_LICENSE in the
+# controller environment (.env via scripts/ansible-env.sh). Never printed.
+
+- name: Require a license value in the controller environment
+  ansible.builtin.assert:
+    that: lookup('env', 'VAULT_LICENSE') | trim | length > 100
+    fail_msg: VAULT_LICENSE is missing or too short; set it in .env and rerun.
+    quiet: true
+  no_log: true
+  run_once: true
+
+- name: Install the license on the node (contents suppressed)
+  ansible.builtin.copy:
+    content: "{{ lookup('env', 'VAULT_LICENSE') | trim }}\n"
+    dest: "{{ vault_license_dest }}"
+    owner: root
+    group: vault
+    mode: "0640"
+  no_log: true
+  diff: false
+  notify: Restart vault

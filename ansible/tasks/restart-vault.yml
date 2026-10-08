@@ -1,0 +1,18 @@
+---
+# Shared restart, one node at a time. Only restarts a service that has
+# already been enabled; first start happens in vault_configure/bootstrap.
+- name: Check whether the vault service is enabled
+  ansible.builtin.command:
+    argv: [systemctl, is-enabled, vault]
+  register: vault_enabled
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Restart vault
+  ansible.builtin.systemd_service:
+    name: vault
+    state: restarted
+    daemon_reload: true
+  throttle: 1
+  when: vault_enabled.stdout == 'enabled'

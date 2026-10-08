@@ -1,0 +1,3 @@
+---
+- name: Restart vault
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/restart-vault.yml"

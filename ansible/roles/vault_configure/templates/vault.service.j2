@@ -1,0 +1,36 @@
+# {{ ansible_managed }}
+[Unit]
+Description=HashiCorp Vault Enterprise ({{ 'seal Vault' if inventory_hostname == lab_seal_node else 'cluster node' }})
+Documentation=https://developer.hashicorp.com/vault/docs
+Requires=network-online.target
+After=network-online.target
+ConditionFileNotEmpty={{ vault_config_file }}
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+User=vault
+Group=vault
+{% if inventory_hostname in groups['vault'] %}
+# A transit-sealed node exits at startup while the seal path (seal agent and
+# the seal Vault behind it) is not ready. The guard fails fast and
+# systemd retries every RestartSec.
+ExecStartPre=/usr/local/bin/vault-wait-seal
+Restart=always
+{% else %}
+Restart=on-failure
+{% endif %}
+ExecStart={{ vault_bin }} server -config={{ vault_config_file }}
+ExecReload=/bin/kill --signal HUP $MAINPID
+KillMode=process
+KillSignal=SIGINT
+RestartSec={{ 10 if inventory_hostname in groups['vault'] else 5 }}
+LimitNOFILE=65536
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths={{ vault_data_dir }}
+
+[Install]
+WantedBy=multi-user.target

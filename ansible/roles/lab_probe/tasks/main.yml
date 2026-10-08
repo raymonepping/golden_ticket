@@ -1,0 +1,51 @@
+---
+# Fixed read-only probe on every node, plus an unprivileged user whose only
+# SSH capability is running it, and only from the console VM (VM-mode UI).
+
+- name: Install the golden_ticket node probe
+  ansible.builtin.template:
+    src: gt-probe.j2
+    dest: "{{ probe_script }}"
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Create the unprivileged probe user
+  ansible.builtin.user:
+    name: "{{ probe_user }}"
+    system: true
+    shell: /bin/sh
+    home: "/var/lib/{{ probe_user }}"
+    create_home: true
+    password: "!"
+
+- name: Create the private probe-key directory on the controller
+  ansible.builtin.file:
+    path: "{{ probe_key | dirname }}"
+    state: directory
+    mode: "0700"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  when: groups['ux'] | default([]) | length > 0
+
+- name: Generate the dedicated probe key on the controller
+  community.crypto.openssh_keypair:
+    path: "{{ probe_key }}"
+    type: ed25519
+    comment: golden-ticket-ux-probe
+    mode: "0600"
+    regenerate: never
+  delegate_to: localhost
+  become: false
+  run_once: true
+  when: groups['ux'] | default([]) | length > 0
+
+- name: Authorize the probe key as a forced command from the UX VM only
+  ansible.posix.authorized_key:
+    user: "{{ probe_user }}"
+    key: "{{ lookup('file', probe_key ~ '.pub') }}"
+    key_options: >-
+      restrict,command="{{ probe_script }}",from="{{ groups['ux'] | map('extract', hostvars, 'ansible_host') | join(',') }}"
+    exclusive: true
+  when: groups['ux'] | default([]) | length > 0

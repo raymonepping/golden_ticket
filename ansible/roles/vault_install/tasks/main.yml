@@ -1,0 +1,84 @@
+---
+# Checksum-verified Vault Enterprise binary on every Vault node and on the
+# seal agent; service account, directories and firewall ports only on the
+# Vault servers. Swap is the baseline's (rhel_baseline).
+
+- name: Ensure the controller cache directory exists
+  ansible.builtin.file:
+    path: "{{ cache_dir }}"
+    state: directory
+    mode: "0700"
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Download the Vault Enterprise archive (SHA-256 verified)
+  ansible.builtin.get_url:
+    url: "https://releases.hashicorp.com/vault/{{ vault_version }}/vault_{{ vault_version }}_{{ vault_arch }}.zip"
+    dest: "{{ cache_dir }}/vault_{{ vault_version }}_{{ vault_arch }}.zip"
+    checksum: "sha256:{{ vault_archive_sha256 }}"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Unpack the Vault binary on the controller
+  ansible.builtin.unarchive:
+    src: "{{ cache_dir }}/vault_{{ vault_version }}_{{ vault_arch }}.zip"
+    dest: "{{ cache_dir }}"
+    include: [vault]
+    creates: "{{ cache_dir }}/vault"
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Install the Vault binary
+  ansible.builtin.copy:
+    src: "{{ cache_dir }}/vault"
+    dest: "{{ vault_bin }}"
+    owner: root
+    group: root
+    mode: "0755"
+  notify: Restart vault
+
+- name: Verify the installed Vault version
+  ansible.builtin.command:
+    argv: ["{{ vault_bin }}", version]
+  register: vault_install_version
+  changed_when: false
+  check_mode: false
+  failed_when: vault_version not in vault_install_version.stdout
+
+- name: Vault server account, directories and ports
+  when: "'agent' not in group_names"
+  block:
+    - name: Create the vault system user
+      ansible.builtin.user:
+        name: vault
+        system: true
+        home: "{{ vault_config_dir }}"
+        shell: /sbin/nologin
+        create_home: false
+
+    - name: Create the Vault directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner }}"
+        group: vault
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: "{{ vault_config_dir }}", owner: root, mode: "0750" }
+        - { path: /opt/vault, owner: root, mode: "0755" }
+        - { path: "{{ vault_data_dir }}", owner: vault, mode: "0750" }
+        - { path: "{{ vault_tls_dir }}", owner: vault, mode: "0750" }
+
+    - name: Open the Vault API and cluster ports
+      ansible.posix.firewalld:
+        port: "{{ item }}/tcp"
+        permanent: true
+        immediate: true
+        state: enabled
+      loop:
+        - "{{ vault_api_port }}"
+        - "{{ vault_cluster_port }}"

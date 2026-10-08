@@ -1,0 +1,19 @@
+#!/bin/bash
+# {{ ansible_managed }}
+# ExecStartPre guard: succeed only when the seal agent on {{ agent_node }}
+# answers through mTLS with this node's certificate — it does so only when it
+# holds an AppRole token and the seal Vault ({{ lab_seal_node }}) is unsealed.
+# Fails fast; systemd (Restart=always) retries, so a sealed seal Vault or a
+# missing agent never blocks boot and never crash-loops Vault itself.
+set -u
+for attempt in 1 2 3; do
+  if curl -fsS -o /dev/null --max-time 3 \
+    --cacert {{ vault_tls_dir }}/ca.crt \
+    --cert {{ vault_tls_dir }}/server.crt --key {{ vault_tls_dir }}/server.key \
+    "https://{{ hostvars[agent_node].ansible_host }}:{{ agent_port }}/v1/sys/health"; then
+    exit 0
+  fi
+  sleep 2
+done
+echo "seal agent {{ agent_node }} / seal Vault {{ lab_seal_node }} not ready; retrying (operator: 'make unseal' if the seal Vault is sealed)" >&2
+exit 1

@@ -1,0 +1,39 @@
+#!/bin/sh
+# {{ ansible_managed }}
+# Fixed, read-only golden_ticket node probe. Takes no arguments; prints key=value
+# lines. Runs as the unprivileged {{ probe_user }} (SSH forced command) or via
+# `multipass exec` from the host console. Never reads secrets.
+release="$(cat /etc/redhat-release 2>/dev/null || true)"
+architecture="$(uname -m 2>/dev/null || true)"
+selinux="$(getenforce 2>/dev/null || true)"
+if [ -z "$(swapon --show --noheadings 2>/dev/null)" ]; then swap=disabled; else swap=active; fi
+firewall="$(systemctl is-active firewalld 2>/dev/null || true)"
+failed_services="$(systemctl --failed --no-legend --plain 2>/dev/null | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')"
+root_fs="$(df -B1 --output=size,pcent / 2>/dev/null | tail -n 1 | tr -s ' ' | sed 's/^ //' || true)"
+clock_offset="$(chronyc -c tracking 2>/dev/null | cut -d, -f5 || true)"
+baseline="$(cat /etc/golden-ticket/baseline 2>/dev/null || true)"
+printf 'baseline=%s\n' "$baseline"
+printf 'release=%s\narchitecture=%s\nselinux=%s\nswap=%s\nfirewall=%s\nfailed_services=%s\nroot_fs=%s\nclock_offset=%s\n' \
+  "$release" "$architecture" "$selinux" "$swap" "$firewall" "$failed_services" "$root_fs" "$clock_offset"
+{% if inventory_hostname in groups['vault'] + groups['vault_seal'] %}
+vault_service="$(systemctl is-active vault 2>/dev/null || true)"
+vault_health="$(curl --silent --max-time 4 'https://127.0.0.1:{{ vault_api_port }}/v1/sys/health{{ '' if inventory_hostname == lab_seal_node else '?standbyok=true&perfstandbyok=true' }}' 2>/dev/null | tr -d '\n' || true)"
+vault_seal="$(curl --silent --max-time 4 'https://127.0.0.1:{{ vault_api_port }}/v1/sys/seal-status' 2>/dev/null | tr -d '\n' || true)"
+printf 'vault_service=%s\nvault_health=%s\nvault_seal=%s\n' "$vault_service" "$vault_health" "$vault_seal"
+{% else %}
+{% set svc = lab_service_probes[gt_role] %}
+service_unit='{{ svc.units | join(',') }}'
+service_active=''
+for unit in {{ svc.units | join(' ') }}; do
+  state="$(systemctl is-active "$unit" 2>/dev/null || true)"
+  service_active="${service_active:+$service_active,}${state:-unknown}"
+done
+service_http="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 4 '{{ svc.url }}' 2>/dev/null || true)"
+printf 'service_unit=%s\nservice_active=%s\nservice_http=%s\n' "$service_unit" "$service_active" "$service_http"
+{% if gt_role == 'proxy' %}
+# Front door: backend/server/status from HAProxy's loopback-only CSV stats.
+front_door="$(curl --silent --max-time 3 'http://127.0.0.1:8405/;csv' 2>/dev/null |
+  awk -F, 'NR > 1 && $2 != "FRONTEND" && $2 != "BACKEND" && $1 !~ /^stats/ { printf "%s%s:%s:%s", sep, $1, $2, $18; sep = ";" }' || true)"
+printf 'front_door=%s\n' "$front_door"
+{% endif %}
+{% endif %}

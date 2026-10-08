@@ -28,3 +28,70 @@ foreign_vm_patterns: ['^red-', '^vault-[0-9]+$']
 lab_ssh_user: ubuntu
 lab_guest_python: /usr/bin/python3.9
 baseline_packages: [python3, curl, jq, tar, unzip, policycoreutils-python-utils, firewalld, chrony]
+
+# ── Names derived from the Terraform inventory (never listed here) ───────────
+lab_seal_node: "{{ groups['vault_seal'] | default(['gt-vault-s']) | first }}"
+agent_node: "{{ groups['agent'] | default(['gt-agent-1']) | first }}"
+proxy_node: "{{ groups['proxy'] | default(['gt-proxy-1']) | first }}"
+identity_node: "{{ groups['identity'] | default(['gt-identity-1']) | first }}"
+ux_node: "{{ groups['ux'] | default(['gt-ux-1']) | first }}"
+vault_leader: >-
+  {{ (groups['vault'] | default([]) | map('extract', hostvars)
+      | selectattr('vault_role', 'defined') | selectattr('vault_role', 'equalto', 'leader')
+      | map(attribute='inventory_hostname') | list + ['gt-vault-1']) | first }}
+
+# ── Vault Enterprise ─────────────────────────────────────────────────────────
+vault_version: "2.1.0+ent"
+vault_archive_sha256: "a0fbfb3fb07e5c4574f07062338f8fb10b4464c0622e3cc9b3b030d3c9afc2da"
+vault_arch: linux_arm64
+vault_bin: /usr/local/bin/vault
+vault_config_dir: /etc/vault.d
+vault_config_file: /etc/vault.d/vault.hcl
+vault_data_dir: /opt/vault/data
+vault_tls_dir: /opt/vault/tls
+vault_license_dest: /opt/vault/vault.hclic
+vault_api_port: 8200
+vault_cluster_port: 8201
+vault_ca_cert: "{{ tls_dir }}/ca.crt"
+
+# ── Seal chain ───────────────────────────────────────────────────────────────
+# gt-vault-s: Shamir 1/1. Its Transit structure (mount, key "autounseal",
+# policies, AppRole roles) is Terraform's (terraform/seal). The cluster
+# reaches it only through the seal agent and holds no seal credential.
+seal_key_shares: 1
+seal_key_threshold: 1
+seal_transit_mount: transit
+seal_transit_key: autounseal
+recovery_shares: 3
+recovery_threshold: 2
+seal_init_path: "{{ secrets_dir }}/seal-init.json"
+vault_init_path: "{{ secrets_dir }}/vault-init.json"
+
+# Written once the agent is proven from a cluster node (prompt 04): only then
+# may the cluster nodes start.
+seal_agent_marker: "{{ build_dir }}/seal-agent.json"
+vault_cluster_may_start: "{{ seal_agent_marker is file }}"
+agent_port: 8100
+agent_metrics_port: 8101
+
+# ── Bootstrap tokens: one per tool per Vault (the boundary Vault enforces) ──
+# Ansible writes these four policies with the root token; Terraform never
+# manages them. Token files: .secrets/tokens/<file>.
+bootstrap_token_period: 24h
+seal_bootstrap_tokens:
+  - { policy: gt-tf-seal, file: tf-seal }
+  - { policy: gt-ansible-seal, file: ansible-seal }
+cluster_bootstrap_tokens:
+  - { policy: gt-tf-platform, file: tf-platform }
+  - { policy: gt-ansible-platform, file: ansible-platform }
+
+# ── Read-only node probe (console) ──────────────────────────────────────────
+probe_user: gtprobe
+probe_script: /usr/local/libexec/gt-probe
+probe_key: "{{ secrets_dir }}/ux/probe_ed25519"
+# Units and HTTPS health per service role (non-Vault nodes).
+lab_service_probes:
+  agent: { units: [vault-agent, seal-rotator.timer], url: "http://127.0.0.1:{{ agent_metrics_port }}/agent/v1/metrics" }
+  proxy: { units: [haproxy], url: "https://{{ ansible_host | default('127.0.0.1') }}:8200/v1/sys/health" }
+  identity: { units: [keycloak, openldap], url: "https://127.0.0.1:9000/health/ready" }
+  ux: { units: [gt-ux], url: "https://127.0.0.1:3443/api/health" }

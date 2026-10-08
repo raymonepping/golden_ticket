@@ -1,0 +1,28 @@
+---
+# preamble.yml — imported first by every playbook that targets the guests.
+# Hosts and groups come from Terraform (cloud.terraform inventory plugin over
+# terraform/infra state); this only asserts that the inventory looks like the
+# lab and that the SSH trust material exists.
+- name: Inventory from Terraform
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [always]
+  tasks:
+    - name: Require the Terraform inventory
+      ansible.builtin.assert:
+        that:
+          - groups['gt'] | default([]) | length > 0
+          - groups['vault'] | default([]) | length == 3
+          - groups['vault_seal'] | default([]) | length == 1
+          - groups['agent'] | default([]) | length == 1
+          - groups['proxy'] | default([]) | length == 1
+          - groups['identity'] | default([]) | length == 1
+          - groups['ux'] | default([]) | length == 1
+          - ssh_private_key is file
+          - ssh_known_hosts is file
+        fail_msg: >-
+          The inventory does not look like golden_ticket (groups:
+          {{ groups.keys() | reject('in', ['all', 'ungrouped']) | list }}). Run 'make infra' first;
+          run playbooks through make / scripts/ansible-run.sh so the Terraform inventory is loaded.
+        quiet: true

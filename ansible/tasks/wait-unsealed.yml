@@ -1,0 +1,14 @@
+---
+# Rolling restarts: an initialised node must be unsealed before the next one
+# restarts. Uninitialised nodes (first build) are not waited for.
+- name: "Wait until unsealed: {{ inventory_hostname }}"
+  ansible.builtin.uri:
+    url: "https://{{ ansible_host }}:{{ vault_api_port }}/v1/sys/seal-status"
+    ca_path: "{{ vault_ca_cert }}"
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  register: wu_status
+  until: wu_status.status == 200 and (not wu_status.json.initialized or not wu_status.json.sealed)
+  retries: 60
+  delay: 3

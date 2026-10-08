@@ -1,0 +1,92 @@
+---
+# The seal Vault (gt-vault-s): init once (Shamir 1/1), unseal, and the two
+# bootstrap tokens (Terraform: structure, Ansible: secret-ids). The Transit
+# mount, key, policies and AppRole roles are Terraform's (terraform/seal).
+# Runs on localhost. Every task touching keys or tokens is no_log.
+
+- name: Address the seal Vault
+  ansible.builtin.set_fact:
+    vault_bootstrap_seal_addr: "https://{{ hostvars[lab_seal_node].ansible_host }}:{{ vault_api_port }}"
+
+- name: Wait for the seal Vault API
+  check_mode: false
+  ansible.builtin.uri:
+    url: "{{ vault_bootstrap_seal_addr }}/v1/sys/seal-status"
+    ca_path: "{{ vault_ca_cert }}"
+  register: vault_bootstrap_seal_status
+  until: vault_bootstrap_seal_status.status == 200
+  retries: 30
+  delay: 2
+
+- name: Check for controller seal initialisation material
+  ansible.builtin.stat:
+    path: "{{ seal_init_path }}"
+  register: vault_bootstrap_seal_init_file
+
+- name: Protect an initialised seal Vault from lost material
+  ansible.builtin.assert:
+    that: vault_bootstrap_seal_status.json.initialized == vault_bootstrap_seal_init_file.stat.exists
+    fail_msg: >-
+      The seal Vault initialised={{ vault_bootstrap_seal_status.json.initialized }} but
+      {{ seal_init_path }} exists={{ vault_bootstrap_seal_init_file.stat.exists }}. Restore the
+      correct file; it is never overwritten and Vault is never reinitialised.
+    quiet: true
+
+- name: Initialise the seal Vault exactly once
+  when: not vault_bootstrap_seal_status.json.initialized
+  no_log: true
+  block:
+    - name: Initialise the seal Vault (Shamir, one key)
+      ansible.builtin.uri:
+        url: "{{ vault_bootstrap_seal_addr }}/v1/sys/init"
+        ca_path: "{{ vault_ca_cert }}"
+        method: PUT
+        body_format: json
+        body:
+          secret_shares: "{{ seal_key_shares | int }}"
+          secret_threshold: "{{ seal_key_threshold | int }}"
+      register: vault_bootstrap_seal_init_result
+      changed_when: true
+
+    - name: Persist the seal initialisation material
+      ansible.builtin.copy:
+        content: "{{ vault_bootstrap_seal_init_result.json | to_nice_json }}\n"
+        dest: "{{ seal_init_path }}"
+        mode: "0600"
+      diff: false
+
+- name: Load the seal initialisation material
+  ansible.builtin.set_fact:
+    vault_bootstrap_seal_init: "{{ lookup('file', seal_init_path) | from_json }}"
+  no_log: true
+
+- name: Unseal the seal Vault
+  ansible.builtin.uri:
+    url: "{{ vault_bootstrap_seal_addr }}/v1/sys/unseal"
+    ca_path: "{{ vault_ca_cert }}"
+    method: PUT
+    body_format: json
+    body:
+      key: "{{ vault_bootstrap_seal_init.keys_base64[item] }}"
+  loop: "{{ range(0, seal_key_threshold | int) | list }}"
+  no_log: true
+  changed_when: true
+  when: vault_bootstrap_seal_status.json.sealed
+
+- name: Wait for the seal Vault to be active
+  check_mode: false
+  ansible.builtin.uri:
+    url: "{{ vault_bootstrap_seal_addr }}/v1/sys/health"
+    ca_path: "{{ vault_ca_cert }}"
+  register: vault_bootstrap_seal_health
+  until: vault_bootstrap_seal_health.status == 200
+  retries: 30
+  delay: 2
+
+- name: Bootstrap tokens on the seal Vault
+  ansible.builtin.include_tasks: tokens.yml
+  vars:
+    bt_addr: "{{ vault_bootstrap_seal_addr }}"
+    bt_root_token: "{{ vault_bootstrap_seal_init.root_token }}"
+    bt_tokens: "{{ seal_bootstrap_tokens }}"
+  when: vault_bootstrap_issue_tokens | default(true) | bool

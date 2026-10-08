@@ -1,0 +1,19 @@
+---
+# Open fw_port/tcp either to everyone (fw_sources empty) or only to the given
+# source addresses (firewalld rich rules), removing the other form.
+# vars: fw_port (int), fw_sources (list of IPv4 addresses)
+
+- name: "Open to everyone, or close to everyone: port {{ fw_port }}"
+  ansible.posix.firewalld:
+    port: "{{ fw_port }}/tcp"
+    permanent: true
+    immediate: true
+    state: "{{ 'enabled' if fw_sources | length == 0 else 'disabled' }}"
+
+- name: "Allow only the listed sources: port {{ fw_port }}"
+  ansible.posix.firewalld:
+    rich_rule: 'rule family="ipv4" source address="{{ item }}/32" port port="{{ fw_port }}" protocol="tcp" accept'
+    permanent: true
+    immediate: true
+    state: enabled
+  loop: "{{ fw_sources }}"

@@ -1,0 +1,17 @@
+---
+# Trust the lab CA system-wide on the node (curl health probes, service
+# clients). Reused by service nodes.
+
+- name: Trust the lab CA system-wide (for curl health probes)
+  ansible.builtin.copy:
+    src: "{{ tls_dir }}/ca.crt"
+    dest: /etc/pki/ca-trust/source/anchors/golden-ticket-lab-ca.crt
+    mode: "0644"
+  register: vault_tls_anchor
+
+- name: Refresh the system trust store
+  ansible.builtin.command:
+    argv: [update-ca-trust, extract]
+  changed_when: true
+  # Immediately, not as a handler: later tasks in the same play curl over TLS.
+  when: vault_tls_anchor is changed # noqa: no-handler

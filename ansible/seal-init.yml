@@ -1,0 +1,18 @@
+---
+# seal-init.yml — the seal Vault: init once (Shamir 1/1), unseal, and the two
+# bootstrap tokens Terraform (terraform/seal) and Ansible (agent.yml) use.
+#
+#   make seal-init
+
+- name: Inventory
+  ansible.builtin.import_playbook: preamble.yml
+
+- name: Seal Vault
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Initialise, unseal and issue the bootstrap tokens
+      ansible.builtin.include_role:
+        name: vault_bootstrap
+        tasks_from: seal.yml
