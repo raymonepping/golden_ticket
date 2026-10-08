@@ -213,3 +213,21 @@ kubeconfig
 .kubeconfig
 kube/config
 
+# ── Added by commit_gh --harden ─────────────────────────────
+*.env
+.vault.*
+*.vault
+*.jsonl
+input/*
+!input/.gitkeep
+output/*
+!output/.gitkeep
+
+.agents/
+.build/
+.cache/
+.claude/
+.codex/
+.impeccable/
+prompts/
+article/
