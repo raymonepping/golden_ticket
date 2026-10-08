@@ -1,8 +1,11 @@
 # golden_ticket
 
-Automation scripts and utilities for shell-based workflows.
+Vault Enterprise on eight RHEL 9.8 ARM64 Multipass VMs, built with
+**Terraform and Ansible together**: Terraform builds the house, Ansible
+decorates it.
 
-> This project was scaffolded automatically using `generate_project.sh`.
+Work in progress — the full README arrives with the final prompt (09).
+Start with `make help`.
 
 ## License
 

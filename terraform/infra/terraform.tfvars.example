@@ -1,0 +1,3 @@
+# Optional overrides (copy to terraform.tfvars, which is ignored).
+# image_dir = "/Users/Shared/gt-images"
+# command_timeout_seconds = 900

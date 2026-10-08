@@ -1,0 +1,9 @@
+---
+# ping.yml — verified SSH reachability of every golden_ticket VM
+# (Terraform inventory, dedicated key, strict host-key checking).
+- name: Ping
+  hosts: gt
+  gather_facts: false
+  tasks:
+    - name: Ping over the dedicated key with strict host-key checking
+      ansible.builtin.ping:

@@ -1,0 +1,60 @@
+---
+# images.yml — per-node image clones for terraform/infra.
+#
+#   make images         (part of make infra; CLEANUP=1 after the apply)
+#
+# Multipass caches file:// images by content and resolves them through the
+# disk of the last instance created from that content: launching fails with a
+# write lock while that VM runs, or inherits its larger disk as a minimum
+# (docs/decisions.md). Every missing node gets an APFS clone (cp -c, instant,
+# no extra space) with a unique trailer after the last qcow2 cluster, which
+# qemu ignores. Clones of nodes that exist are removed after the apply.
+
+- name: Image clones
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    images_cleanup: "{{ lookup('env', 'CLEANUP') == '1' }}"
+  tasks:
+    - name: Read the Multipass inventory
+      ansible.builtin.command:
+        argv: [multipass, list, --format, json]
+      register: img_list
+      changed_when: false
+      check_mode: false
+
+    - name: Work out which nodes exist
+      ansible.builtin.set_fact:
+        img_names: "{{ (lookup('file', tf_dir ~ '/infra/nodes.auto.tfvars.json') | from_json).nodes | list }}"
+        img_existing: "{{ (img_list.stdout | from_json).list | map(attribute='name') | list }}"
+
+    - name: Ensure the clone directory exists
+      ansible.builtin.file:
+        path: "{{ lab_image_clone_dir }}"
+        state: directory
+        mode: "0755"
+      when: not images_cleanup | bool
+
+    # The one documented shell task: values arrive through environment:,
+    # never interpolated into the command string.
+    - name: Clone the image for every missing node, with a unique identity
+      ansible.builtin.shell:
+        cmd: >-
+          cp -c "$SRC" "$DST.tmp" &&
+          printf '\ngolden-ticket-image-identity:%s\n' "$NODE" >> "$DST.tmp" &&
+          mv "$DST.tmp" "$DST"
+        creates: "{{ lab_image_clone_dir }}/{{ item }}.qcow2"
+      environment:
+        SRC: "{{ lab_image }}"
+        DST: "{{ lab_image_clone_dir }}/{{ item }}.qcow2"
+        NODE: "{{ item }}"
+      loop: "{{ img_names | reject('in', img_existing) | list }}"
+      when: not images_cleanup | bool
+
+    - name: Remove the clones of nodes that now exist
+      ansible.builtin.file:
+        path: "{{ lab_image_clone_dir }}/{{ item }}.qcow2"
+        state: absent
+      loop: "{{ img_names | select('in', img_existing) | list }}"
+      when: images_cleanup | bool

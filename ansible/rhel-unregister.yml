@@ -1,0 +1,43 @@
+---
+# rhel-unregister.yml — remove the golden_ticket guests from Red Hat
+# Subscription Management. Never run by lab or destroy.
+#
+#   CONFIRM_RHSM_UNREGISTER=yes make rhel-unregister
+
+- name: Require explicit confirmation
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Require CONFIRM_RHSM_UNREGISTER=yes
+      ansible.builtin.assert:
+        that: lookup('env', 'CONFIRM_RHSM_UNREGISTER') == 'yes'
+        fail_msg: Set CONFIRM_RHSM_UNREGISTER=yes to unregister the golden_ticket guests.
+        quiet: true
+
+- name: Unregister the guests
+  hosts: gt
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Check registration
+      ansible.builtin.command:
+        argv: [subscription-manager, identity]
+      register: unreg_identity
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Unregister from Red Hat
+      ansible.builtin.command:
+        argv: [subscription-manager, unregister]
+      changed_when: true
+      when: unreg_identity.rc == 0
+
+    - name: Verify the identity is gone
+      ansible.builtin.command:
+        argv: [subscription-manager, identity]
+      register: unreg_after
+      changed_when: false
+      failed_when: unreg_after.rc == 0
+      when: not ansible_check_mode

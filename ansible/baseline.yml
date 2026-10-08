@@ -1,0 +1,130 @@
+---
+# baseline.yml — the RHEL baseline every golden_ticket VM gets.
+#
+# Normally run BY TERRAFORM (ansible_playbook.baseline in terraform/infra)
+# with the node map handed over in-graph as gt_nodes_json. Also runnable from
+# Make (`make baseline`) with the Terraform inventory plugin; both paths
+# converge to changed=0.
+
+- name: SSH trust and the node handoff
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Build the node map (Terraform handoff, or the Terraform inventory)
+      ansible.builtin.set_fact:
+        bl_nodes: >-
+          {%- if gt_nodes_json is defined -%}
+          {{ gt_nodes_json | from_json }}
+          {%- else -%}
+          {%- set out = {} -%}
+          {%- for h in groups['gt'] | default([]) -%}
+          {%- set _ = out.update({h: {
+                'ipv4': hostvars[h].ansible_host,
+                'group': hostvars[h].group_names | reject('equalto', 'gt') | first,
+                'gt_role': hostvars[h].gt_role,
+                'vault_role': hostvars[h].vault_role}}) -%}
+          {%- endfor -%}
+          {{ out }}
+          {%- endif -%}
+
+    - name: Require the handoff and the trust material
+      ansible.builtin.assert:
+        that:
+          - bl_nodes | length > 0
+          - ssh_private_key is file
+          - ssh_known_hosts is file
+        fail_msg: No nodes handed over, or the controller key is missing (run make preflight).
+        quiet: true
+
+    - name: Wait for SSH on every node
+      ansible.builtin.wait_for:
+        host: "{{ item.value.ipv4 }}"
+        port: 22
+        timeout: 300
+      loop: "{{ bl_nodes | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: Scan the ED25519 host key of each node
+      ansible.builtin.command:
+        argv: [ssh-keyscan, -T, "10", -t, ed25519, "{{ item.value.ipv4 }}"]
+      loop: "{{ bl_nodes | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      register: bl_scan
+      changed_when: false
+      check_mode: false
+      retries: 10
+      delay: 3
+      until: bl_scan.rc == 0 and (bl_scan.stdout_lines | reject('match', '^#') | list | length > 0)
+
+    - name: Look up already-trusted host keys
+      ansible.builtin.command:
+        argv: [ssh-keygen, -F, "{{ item.value.ipv4 }}", -f, "{{ ssh_known_hosts }}"]
+      loop: "{{ bl_nodes | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      register: bl_known
+      changed_when: false
+      check_mode: false
+      failed_when: bl_known.rc not in [0, 1]
+
+    - name: Fail closed on a changed host key
+      ansible.builtin.assert:
+        that: >-
+          item.1.rc != 0 or confirm_host_key_change | default(false) | bool or
+          ((item.0.stdout_lines | reject('match', '^#') | first).split()[2]) in item.1.stdout
+        fail_msg: >-
+          The SSH host key of {{ item.0.item.key }} ({{ item.0.item.value.ipv4 }}) changed.
+          Verify the VM was intentionally recreated, then rerun with
+          -e confirm_host_key_change=true.
+        quiet: true
+      loop: "{{ bl_scan.results | zip(bl_known.results) | list }}"
+      loop_control:
+        label: "{{ item.0.item.key }}"
+
+    - name: Record the trusted host keys (comment lines stripped)
+      ansible.builtin.known_hosts:
+        path: "{{ ssh_known_hosts }}"
+        name: "{{ item.item.value.ipv4 }}"
+        key: "{{ item.stdout_lines | reject('match', '^#') | first }}"
+        state: present
+      loop: "{{ bl_scan.results }}"
+      loop_control:
+        label: "{{ item.item.key }}"
+
+    - name: Add the nodes to the in-memory inventory (Terraform handoff only)
+      ansible.builtin.add_host:
+        name: "{{ item.key }}"
+        groups: [gt, "{{ item.value.group }}"]
+        ansible_host: "{{ item.value.ipv4 }}"
+        gt_role: "{{ item.value.gt_role }}"
+        vault_role: "{{ item.value.vault_role }}"
+      loop: "{{ bl_nodes | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      changed_when: false
+      when: gt_nodes_json is defined
+
+- name: RHEL baseline
+  hosts: gt
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Wait for cloud-init to finish without errors
+      ansible.builtin.command:
+        argv: [cloud-init, status, --wait, --long]
+      register: bl_cloud_init
+      changed_when: false
+      check_mode: false
+      failed_when: >-
+        'status: done' not in bl_cloud_init.stdout or
+        'errors: []' not in bl_cloud_init.stdout
+
+    - name: Gather facts
+      ansible.builtin.setup:
+
+    - name: Apply the baseline
+      ansible.builtin.import_role:
+        name: rhel_baseline

@@ -1,0 +1,30 @@
+---
+# Non-topology settings only. Names, groups, roles, addresses and sizing come
+# from Terraform (terraform/infra inventory resources / outputs).
+
+project_name: golden_ticket
+repo_root: "{{ (playbook_dir ~ '/..') | realpath }}"
+
+# ── Controller paths (all ignored by Git) ────────────────────────────────────
+secrets_dir: "{{ repo_root }}/.secrets"
+build_dir: "{{ repo_root }}/.build"
+cache_dir: "{{ repo_root }}/.cache"
+tf_dir: "{{ repo_root }}/terraform"
+tls_dir: "{{ secrets_dir }}/tls"
+tokens_dir: "{{ secrets_dir }}/tokens"
+ssh_dir: "{{ secrets_dir }}/ansible"
+ssh_private_key: "{{ ssh_dir }}/id_ed25519"
+ssh_known_hosts: "{{ ssh_dir }}/known_hosts"
+
+# ── Images (Multipass content-cache workaround) ──────────────────────────────
+lab_image: "{{ lookup('env', 'GT_IMAGE') | default('/Users/Shared/rhel-9.8-aarch64-kvm.qcow2', true) }}"
+lab_image_clone_dir: /Users/Shared/gt-images
+
+# Other projects' VMs: never touched. Preflight refuses to build while any of
+# them runs (the Mac cannot hold two labs).
+foreign_vm_patterns: ['^red-', '^vault-[0-9]+$']
+
+# ── Guests ───────────────────────────────────────────────────────────────────
+lab_ssh_user: ubuntu
+lab_guest_python: /usr/bin/python3.9
+baseline_packages: [python3, curl, jq, tar, unzip, policycoreutils-python-utils, firewalld, chrony]

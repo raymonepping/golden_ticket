@@ -1,0 +1,98 @@
+---
+# preflight.yml — controller checks before Terraform builds anything.
+#
+#   make preflight      (part of make infra)
+#
+# Creates the dedicated controller SSH key (Terraform reads its public half
+# into cloud-init). Refuses to continue while another project's VMs run.
+
+- name: Preflight
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Require the controller tools
+      ansible.builtin.command:
+        argv: [which, "{{ item }}"]
+      loop: [multipass, terraform, ansible-playbook, jq, openssl, vault, shasum, ssh-keyscan, curl]
+      changed_when: false
+      check_mode: false
+
+    - name: Require the operator inputs in the environment (values suppressed)
+      ansible.builtin.assert:
+        that:
+          - lookup('env', 'VAULT_LICENSE') | length > 100
+          - lookup('env', 'RHSM_ORG') | length > 0
+          - lookup('env', 'RHSM_ACTIVATION_KEY') | length > 0
+        fail_msg: >-
+          VAULT_LICENSE, RHSM_ORG and RHSM_ACTIVATION_KEY must be set in .env.
+          Run through make (scripts/ansible-run.sh / tf-run.sh).
+        quiet: true
+      no_log: true
+
+    - name: Require the source RHEL image
+      ansible.builtin.stat:
+        path: "{{ lab_image }}"
+      register: pre_image
+      failed_when: not pre_image.stat.exists
+
+    - name: Read the Multipass inventory
+      ansible.builtin.command:
+        argv: [multipass, list, --format, json]
+      register: pre_list
+      changed_when: false
+      check_mode: false
+
+    - name: Refuse while another project's VMs are running
+      ansible.builtin.assert:
+        that: pre_foreign | length == 0
+        fail_msg: >-
+          Stop these first (golden_ticket never stops other projects' VMs):
+          multipass stop {{ pre_foreign | join(' ') }}
+          (red_pass: `make down` in ../red_pass).
+        quiet: true
+      vars:
+        pre_foreign: >-
+          {{ (pre_list.stdout | from_json).list | selectattr('state', 'equalto', 'Running')
+             | map(attribute='name')
+             | select('match', foreign_vm_patterns | join('|')) | list }}
+
+    - name: Read the host memory
+      ansible.builtin.command:
+        argv: [sysctl, -n, hw.memsize]
+      register: pre_memsize
+      changed_when: false
+      check_mode: false
+
+    - name: Warn when the lab would use more than 75 % of host memory
+      ansible.builtin.debug:
+        msg: >-
+          The nodes map asks for {{ pre_mem_gb }}G of {{ pre_host_gb }}G host memory.
+      vars:
+        pre_nodes: "{{ (lookup('file', tf_dir ~ '/infra/nodes.auto.tfvars.json') | from_json).nodes }}"
+        pre_mem_gb: "{{ pre_nodes.values() | map(attribute='memory') | map('regex_replace', 'G$', '') | map('int') | sum }}"
+        pre_host_gb: "{{ (pre_memsize.stdout | int / 1073741824) | int }}"
+      when: (pre_mem_gb | int) > (pre_host_gb | int * 0.75)
+
+    - name: Create the private controller directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0700"
+      loop: ["{{ secrets_dir }}", "{{ ssh_dir }}", "{{ tokens_dir }}", "{{ build_dir }}"]
+
+    - name: Generate or reuse the dedicated controller SSH key pair
+      community.crypto.openssh_keypair:
+        path: "{{ ssh_private_key }}"
+        type: ed25519
+        comment: golden-ticket-lab
+        mode: "0600"
+        regenerate: never
+
+    - name: Ensure the project known_hosts file exists
+      ansible.builtin.file:
+        path: "{{ ssh_known_hosts }}"
+        state: touch
+        mode: "0600"
+        access_time: preserve
+        modification_time: preserve

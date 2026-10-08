@@ -115,6 +115,7 @@ docker-compose.override.yml
 ########################################
 .env
 .env.*
+!.env.example
 
 ########################################
 # 🛠️ Terraform
@@ -125,6 +126,7 @@ docker-compose.override.yml
 *.tfplan
 *.backup
 .terraform.lock.hcl
+!terraform/**/.terraform.lock.hcl
 *.log
 crash.log
 justfile
@@ -231,3 +233,5 @@ output/*
 .impeccable/
 prompts/
 article/
+# Fake public key used only by terraform test (not a real identity)
+!terraform/**/tests/fixtures/*.pub

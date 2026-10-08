@@ -1,0 +1,14 @@
+#cloud-config
+
+# Multipass injects Ubuntu-specific vendor-data that installs pollinate.
+# RHEL does not provide it, so mark only that module complete before final stage.
+bootcmd:
+  - [touch, /var/lib/cloud/instance/sem/config_package_update_upgrade_install]
+
+package_update: false
+package_upgrade: false
+
+# Only the dedicated golden_ticket controller public key is rendered here.
+# Its private half stays on the controller under .secrets/ansible/.
+ssh_authorized_keys:
+  - ${ssh_public_key}

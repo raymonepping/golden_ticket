@@ -1,0 +1,8 @@
+---
+# Connection settings for every golden_ticket guest (group `gt`, from the
+# Terraform inventory or the baseline handoff). Paths only, never key material.
+ansible_user: "{{ lab_ssh_user }}"
+ansible_python_interpreter: "{{ lab_guest_python }}"
+ansible_ssh_private_key_file: "{{ ssh_private_key }}"
+ansible_ssh_common_args: >-
+  -o StrictHostKeyChecking=yes -o UserKnownHostsFile={{ ssh_known_hosts }}
