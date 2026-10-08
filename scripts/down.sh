@@ -25,7 +25,11 @@ names() {
 }
 
 # Services in this order: console, front door, identity.
-mapfile -t services < <(names ux; names proxy; names identity)
+mapfile -t services < <(
+  names ux
+  names proxy
+  names identity
+)
 mapfile -t cluster < <(names cluster)
 mapfile -t agent < <(names agent)
 mapfile -t seal < <(names seal)
@@ -46,17 +50,17 @@ act() {
 }
 
 case "${1:-}" in
-  down)
-    reversed=()
-    for ((i = ${#cluster[@]} - 1; i >= 0; i--)); do reversed+=("${cluster[i]}"); done
-    act stop "${services[@]}" "${reversed[@]}" "${agent[@]}" "${seal[@]}"
-    info "golden_ticket VMs stopped (nothing deleted). Start again with: make up"
-    ;;
-  up)
-    act start "${seal[@]}" "${agent[@]}" "${cluster[@]}" "${services[@]}"
-    info "golden_ticket VMs started. The seal Vault is sealed after a start: make unseal"
-    ;;
-  *)
-    die "Usage: down.sh down|up"
-    ;;
+down)
+  reversed=()
+  for ((i = ${#cluster[@]} - 1; i >= 0; i--)); do reversed+=("${cluster[i]}"); done
+  act stop "${services[@]}" "${reversed[@]}" "${agent[@]}" "${seal[@]}"
+  info "golden_ticket VMs stopped (nothing deleted). Start again with: make up"
+  ;;
+up)
+  act start "${seal[@]}" "${agent[@]}" "${cluster[@]}" "${services[@]}"
+  info "golden_ticket VMs started. The seal Vault is sealed after a start: make unseal"
+  ;;
+*)
+  die "Usage: down.sh down|up"
+  ;;
 esac
